@@ -1,176 +1,276 @@
+"""
+Mono-Copilot API - REST endpoints for BRD/PRD generation workflow.
+
+Endpoints:
+- POST /projects/create - Create new project
+- POST /agent/start - Start BA agent to generate BRD
+- POST /approve - Approve or request changes
+- POST /clarification - Send clarification feedback
+- GET /projects/{name}/brd - Get BRD
+- GET /projects/{name}/prd - Get PRD
+- GET /projects/{name}/status - Get project status
+"""
+
 import os
-from agents import Runner
-from agents.run import RunConfig
-from agents.sandbox import (
-    Dir,
-    Manifest,
-    SandboxAgent,
-    SandboxRunConfig,
-)
-from agents.sandbox.capabilities import Capabilities, Skills
-from agents.sandbox.entries.base import BaseEntry
-from agents.sandbox.entries import File, GitRepo
-from agents.sandbox.manifest import Environment
-from agents.sandbox.sandboxes.docker import DockerSandboxClient, DockerSandboxClientOptions
-from docker import from_env as docker_from_env
-from dotenv import load_dotenv
+from typing import Optional
+from datetime import datetime
 from fastapi import FastAPI, HTTPException
-from pathlib import Path
 from pydantic import BaseModel
+from dotenv import load_dotenv
 import uvicorn
+
+from .orchestrator import Orchestrator
 
 load_dotenv()
 
-app = FastAPI()
-
-
-def _runtime_shim(binary: str) -> File:
-    binary_path = f"/usr/local/bin/{binary}"
-    content = (
-        "#!/bin/sh\n"
-        f"if [ -x {binary_path!r} ]; then\n"
-        f"  exec {binary_path!r} \"$@\"\n"
-        "fi\n"
-        f"echo '{binary} is not installed in this Docker sandbox image.' >&2\n"
-        "echo 'Set SANDBOX_DOCKER_IMAGE to an image that includes uv and bun.' >&2\n"
-        "exit 127\n"
-    )
-    return File(content=content.encode("utf-8"))
-
-
-def _docker_image() -> str:
-    return os.getenv("SANDBOX_DOCKER_IMAGE", "mono-copilot-sandbox:latest")
-
-
-def _skills_repo() -> GitRepo:
-    return GitRepo(
-        repo=os.getenv("SANDBOX_SKILLS_REPO", "mosesgameli/myagentskills"),
-        ref=os.getenv("SANDBOX_SKILLS_REF", "main"),
-        subpath=os.getenv("SANDBOX_SKILLS_SUBPATH", ".agents/skills"),
-    )
-
-
-def _sandbox_manifest() -> Manifest:
-    entries: dict[str | Path, BaseEntry] = {
-        "tools/": Dir(),
-        "tools/bin/": Dir(),
-        "tools/bin/uv": _runtime_shim("uv"),
-        "tools/bin/bun": _runtime_shim("bun"),
-        "tmp/": Dir(),
-        ".bun/": Dir(),
-    }
-
-    return Manifest(
-        entries=entries,
-        environment=Environment(
-            value={
-                "PATH": "tools/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-                "TMPDIR": "tmp",
-                "BUN_INSTALL": ".bun",
-                "BUN_TMPDIR": "tmp",
-            }
-        ),
-    )
-
-agent = SandboxAgent(
-    name="Sandbox Coding Agent",
-    instructions=(
-        "You are a coding agent operating inside a sandbox workspace. "
-        "Inspect the workspace before making assumptions. "
-        "When a user asks you to run a one-off script, execute it in the sandbox and report the result. "
-        "Runtime policy: run Python scripts with './tools/bin/uv run python <script_or_flags>' and run JavaScript/TypeScript with './tools/bin/bun' (for example './tools/bin/bun run', './tools/bin/bun <file>.js', or './tools/bin/bun <file>.ts'). "
-        "Prefer these runtimes over direct python/node execution unless the command fails and you explain why. "
-        "For executed commands, include: the exact command, exit status, stdout, and stderr in your response. "
-        "Keep answers concise, factual, and focused on implementation details."
-    ),
-    default_manifest=_sandbox_manifest(),
-    capabilities=[
-        *Capabilities.default(),
-        Skills(
-            from_=_skills_repo(),
-            skills_path=os.getenv("SANDBOX_SKILLS_PATH", ".agents/skills"),
-        ),
-    ],
+app = FastAPI(
+    title="Mono-Copilot",
+    description="Enterprise MNO product development assistant",
+    version="1.0.0"
 )
 
-
-class AgentRequest(BaseModel):
-    user_input: str
+orchestrator = Orchestrator()
 
 
-class AgentResponse(BaseModel):
-    response: str
+class CreateProjectRequest(BaseModel):
+    """Request to create a new project."""
+    name: str
+    segment: str = "postpaid_consumer"
+    context: Optional[dict] = None
 
 
-def _mask_secret(value: str | None) -> str:
-    if not value:
-        return "<missing>"
-    if len(value) <= 8:
-        return "*" * len(value)
-    return f"{value[:4]}...{value[-4:]}"
+class StartAgentRequest(BaseModel):
+    """Request to start BA agent."""
+    project_name: str
+    problem_statement: str
+    segment: str = "postpaid_consumer"
+    context: Optional[dict] = None
 
 
+class ApprovalRequest(BaseModel):
+    """Request to approve or provide feedback."""
+    project_name: str
+    stage: str
+    decision: str
+    feedback: Optional[str] = None
 
 
+class ClarificationRequest(BaseModel):
+    """Request to send clarification feedback."""
+    project_name: str
+    stage: str
+    responses: dict
 
-@app.get("/")
-def read_root() -> dict[str, str]:
-    return {"Hello": "World"}
+
+@app.get("/health")
+async def health_check():
+    """Service health check."""
+    return {
+        "status": "ok",
+        "timestamp": datetime.now().isoformat(),
+        "service": "mono-copilot"
+    }
 
 
-@app.post("/agent", response_model=AgentResponse)
-async def run_agent(request: AgentRequest) -> AgentResponse:
-    docker_client = None
-    sandbox = None
-
+@app.post("/projects/create")
+async def create_project(request: CreateProjectRequest):
+    """Create a new project."""
     try:
-        docker_client = DockerSandboxClient(docker_from_env())
-        sandbox = await docker_client.create(
-            manifest=_sandbox_manifest(),
-            options=DockerSandboxClientOptions(image=_docker_image()),
-        )
-        async with sandbox:
-            preflight = await sandbox.exec("./tools/bin/uv --version && ./tools/bin/bun --version", shell=True)
-            if preflight.exit_code != 0:
-                stderr = preflight.stderr.decode("utf-8", errors="replace").strip()
-                raise HTTPException(
-                    status_code=500,
-                    detail=(
-                        "Docker sandbox image is missing uv and/or bun. "
-                        "Set SANDBOX_DOCKER_IMAGE to an image that includes both runtimes (for example mono-copilot-sandbox:latest). "
-                        f"Preflight error: {stderr}"
-                    ),
-                )
+        if not request.name:
+            raise ValueError("Project name required")
+        
+        return {
+            "status": "success",
+            "project_name": request.name,
+            "segment": request.segment,
+            "message": "Project created. Ready to generate BRD.",
+            "next_action": "/agent/start"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
-            result = await Runner.run(
-                agent,
-                request.user_input,
-                run_config=RunConfig(
-                    sandbox=SandboxRunConfig(session=sandbox),
-                    workflow_name="Copilot docker sandbox coding agent",
-                ),
-            )
+
+@app.post("/agent/start")
+async def start_agent(request: StartAgentRequest):
+    """Start BA agent to generate BRD."""
+    try:
+        if not request.project_name or not request.problem_statement:
+            raise ValueError("project_name and problem_statement required")
+        
+        result = await orchestrator.process_input(
+            project_name=request.project_name,
+            user_id="user_1",
+            problem_statement=request.problem_statement,
+            segment=request.segment,
+            context=request.context
+        )
+        
+        return result
+    
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/approve")
+async def approve_artifact(request: ApprovalRequest):
+    """Approve or request changes to BRD/PRD."""
+    try:
+        if not request.project_name or not request.stage or not request.decision:
+            raise ValueError("project_name, stage, and decision required")
+        
+        result = await orchestrator.handle_approval(
+            project_name=request.project_name,
+            stage=request.stage,
+            decision=request.decision,
+            feedback=request.feedback
+        )
+        
+        return result
+    
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/clarification")
+async def send_clarification(request: ClarificationRequest):
+    """Send clarification feedback and regenerate document."""
+    try:
+        if not request.project_name or not request.stage or not request.responses:
+            raise ValueError("project_name, stage, and responses required")
+        
+        result = await orchestrator.handle_clarification_response(
+            project_name=request.project_name,
+            stage=request.stage,
+            responses=request.responses
+        )
+        
+        return result
+    
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/projects/{project_name}/brd")
+async def get_brd(project_name: str):
+    """Get BRD for a project."""
+    try:
+        from .services.file_manager import FileManager
+        fm = FileManager()
+        content = fm.load_brd(project_name)
+        
+        if not content:
+            raise HTTPException(status_code=404, detail="BRD not found")
+        
+        return {
+            "status": "success",
+            "project_name": project_name,
+            "content": content,
+            "content_type": "text/markdown"
+        }
+    
     except HTTPException:
         raise
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Agent execution failed: {exc}") from exc
-    finally:
-        if docker_client is not None and sandbox is not None:
-            try:
-                await docker_client.delete(sandbox)
-            except Exception:
-                pass
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
-    return AgentResponse(response=str(result.final_output))
+
+@app.get("/projects/{project_name}/prd")
+async def get_prd(project_name: str):
+    """Get PRD for a project."""
+    try:
+        from .services.file_manager import FileManager
+        fm = FileManager()
+        content = fm.load_prd(project_name)
+        
+        if not content:
+            raise HTTPException(status_code=404, detail="PRD not found")
+        
+        return {
+            "status": "success",
+            "project_name": project_name,
+            "content": content,
+            "content_type": "text/markdown"
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/projects/{project_name}/status")
+async def get_project_status(project_name: str):
+    """Get project status and stage."""
+    try:
+        session = orchestrator.context_manager.get_session(project_name)
+        
+        if not session:
+            raise HTTPException(status_code=404, detail="Project not found")
+        
+        return {
+            "status": "success",
+            "project_name": project_name,
+            "stage": session.get("stage"),
+            "run_count": session.get("run_count", 1),
+            "problem_statement": session.get("problem_statement"),
+            "segment": session.get("segment"),
+            "created_at": session.get("created_at")
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/projects/{project_name}/files")
+async def list_project_files(project_name: str):
+    """List all files in project directory."""
+    try:
+        from pathlib import Path
+        project_path = Path("projects") / project_name
+        
+        if not project_path.exists():
+            raise HTTPException(status_code=404, detail="Project not found")
+        
+        files = []
+        for file in project_path.glob("*"):
+            if file.is_file():
+                files.append({
+                    "name": file.name,
+                    "size": file.stat().st_size,
+                    "modified": datetime.fromtimestamp(file.stat().st_mtime).isoformat()
+                })
+        
+        return {
+            "status": "success",
+            "project_name": project_name,
+            "files": files
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.on_event("startup")
+async def startup_event():
+    """Initialize on startup."""
+    from pathlib import Path
+    Path("projects").mkdir(exist_ok=True)
+    print("✅ Mono-Copilot started")
+
 
 def run() -> None:
-    environment = os.getenv("APP_ENV", "production").lower()
-
+    """Run the server."""
+    environment = os.getenv("APP_ENV", "development").lower()
+    
     if environment == "development":
-        print("Running in development mode with hot reload enabled.")
+        print("Running in development mode with hot reload")
         uvicorn.run("copilot.main:app", host="127.0.0.1", port=8000, reload=True)
     else:
-        print("Running in production mode.")
+        print("Running in production mode")
         uvicorn.run("copilot.main:app", host="0.0.0.0", port=8000, reload=False)
 
 
