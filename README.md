@@ -104,16 +104,6 @@ Expected response shape:
 }
 ```
 
-## Optional: Run Sandbox Demo Script
-
-The copilot package also exposes a sandbox demo entry point:
-
-```bash
-uv run --package copilot mono
-```
-
-This requires local environment support for the sandbox components used in apps/copilot/src/copilot/mono.py.
-
 ## Troubleshooting
 
 Port already in use (127.0.0.1:8000):

@@ -323,6 +323,8 @@ class Orchestrator:
                     "stage": "ba_approval",
                     "document_id": ba_result.get("document_id"),
                     "output": brd_markdown,
+                    "quality_gates": ba_result.get("quality_gates", {}),
+                    "quality_gates_passed": ba_result.get("quality_gates_passed", False),
                     "run_number": current_run,
                     "message": f"BRD updated (attempt {current_run}). Review and approve or provide more feedback."
                 }
@@ -364,6 +366,8 @@ class Orchestrator:
                     "stage": "pe_approval",
                     "document_id": pe_result.get("document_id"),
                     "output": prd_markdown,
+                    "quality_gates": pe_result.get("quality_gates", {}),
+                    "quality_gates_passed": pe_result.get("quality_gates_passed", False),
                     "run_number": current_run,
                     "message": f"PRD updated (attempt {current_run}). Review and approve or provide more feedback."
                 }

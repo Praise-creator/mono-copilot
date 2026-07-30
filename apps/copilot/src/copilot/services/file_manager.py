@@ -1,4 +1,6 @@
 import os
+import shutil
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -16,10 +18,21 @@ class FileManager:
         project_path.mkdir(exist_ok=True)
         return project_path
 
+    def _archive_existing(self, project_dir: Path, current_path: Path) -> None:
+        """Keep the previous version before a rework overwrites it"""
+        if not current_path.exists():
+            return
+        history_dir = project_dir / "history"
+        history_dir.mkdir(exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        archived_name = f"{current_path.stem}-{timestamp}{current_path.suffix}"
+        shutil.copy2(current_path, history_dir / archived_name)
+
     def save_brd(self, project_name: str, content: str) -> str:
-        """Save BRD to projects/{project_name}/ba-output.md"""
+        """Save BRD to projects/{project_name}/ba-output.md, archiving the previous version"""
         project_dir = self.get_project_dir(project_name)
         brd_path = project_dir / "ba-output.md"
+        self._archive_existing(project_dir, brd_path)
         brd_path.write_text(content)
         return str(brd_path)
 
@@ -31,9 +44,10 @@ class FileManager:
         return None
 
     def save_prd(self, project_name: str, content: str) -> str:
-        """Save PRD to projects/{project_name}/pe-output.md"""
+        """Save PRD to projects/{project_name}/pe-output.md, archiving the previous version"""
         project_dir = self.get_project_dir(project_name)
         prd_path = project_dir / "pe-output.md"
+        self._archive_existing(project_dir, prd_path)
         prd_path.write_text(content)
         return str(prd_path)
 

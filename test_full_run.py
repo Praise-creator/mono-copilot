@@ -39,6 +39,18 @@ SEGMENT = "postpaid_consumer"
 PROJECT_NAME = "nigeria-churn-reduction-v1"
 USER_ID = "kb-test"
 
+APPROVAL_WORDS = {
+    "approve", "approved", "a", "yes", "y", "yeah", "yep", "sure",
+    "ok", "okay", "good", "great", "fine", "done", "finish", "finished",
+    "complete", "completed", "ship it", "lgtm", "looks good", "good to go",
+    "no changes", "no changes needed", "that's fine", "thats fine", "all good"
+}
+
+
+def is_approval(text: str) -> bool:
+    """Anything not clearly an approval word is treated as feedback."""
+    return text.strip().lower() in APPROVAL_WORDS
+
 
 async def main():
     print("\nFULL END-TO-END TEST: Problem Statement → BRD → PRD")
@@ -61,28 +73,67 @@ async def main():
         print(f"BA FAILED: {ba_result.get('message')}")
         return
 
-    print(f"BRD generated")
-    print(f"Stage    : {ba_result.get('stage')}")
-    print(f"Document : {ba_result.get('document_id')}")
-
-    brd_gates = ba_result.get("quality_gates", {})
-    print("\nBA Quality Gates:")
-    for gate, passed in brd_gates.items():
-        print(f"  {gate}: {'PASS' if passed else 'FAIL'}")
-
     brd_markdown = ba_result.get("output", "")
-    print(f"\nBRD length : {len(brd_markdown)} characters")
-    has_mermaid = "```mermaid" in brd_markdown
-    print(f"BRD Mermaid: {'YES - ' + str(brd_markdown.count('```mermaid')) + ' diagram(s)' if has_mermaid else 'NO'}")
+    brd_path = Path("projects") / PROJECT_NAME / "ba-output.md"
 
-    print("\nBRD Preview (first 600 characters):")
-    print("-" * 70)
-    print(brd_markdown[:600])
-    print("...")
+    while True:
+        print(f"BRD generated")
+        print(f"Stage    : {ba_result.get('stage')}")
+        print(f"Document : {ba_result.get('document_id')}")
+
+        brd_gates = ba_result.get("quality_gates", {})
+        print("\nBA Quality Gates:")
+        for gate, passed in brd_gates.items():
+            print(f"  {gate}: {'PASS' if passed else 'FAIL'}")
+
+        print(f"\nBRD length : {len(brd_markdown)} characters")
+        has_mermaid = "```mermaid" in brd_markdown
+        print(f"BRD Mermaid: {'YES - ' + str(brd_markdown.count('```mermaid')) + ' diagram(s)' if has_mermaid else 'NO'}")
+
+        print(f"\nFull BRD saved at: {brd_path.resolve()}")
+        print("Open that file and review it.")
+
+        decision = input("\nApprove BRD and move to PE? (type 'approve', or just describe what to change): ").strip()
+
+        if is_approval(decision):
+            break
+        else:
+            if decision.lower() in ("no", "n", "reject", "disapprove", "decline"):
+                feedback = input("What should change in the BRD? ").strip()
+            else:
+                feedback = decision
+
+            if not feedback:
+                print("Please type 'approve' or describe the changes you want.")
+                continue
+
+            clarify_result = await orchestrator.handle_approval(
+                project_name=PROJECT_NAME,
+                stage="ba",
+                decision="needs_changes"
+            )
+            if clarify_result.get("status") != "success":
+                print(f"CLARIFICATION FAILED: {clarify_result.get('message')}")
+                return
+
+            print("\nRegenerating BRD with your feedback...")
+            print("(This calls OpenAI — expect 30-60 seconds)\n")
+
+            rework_result = await orchestrator.handle_clarification_response(
+                project_name=PROJECT_NAME,
+                stage="ba",
+                responses={"feedback": feedback}
+            )
+            if rework_result.get("status") != "success":
+                print(f"BRD REWORK FAILED: {rework_result.get('message')}")
+                return
+
+            ba_result = rework_result
+            brd_markdown = rework_result.get("output", "")
 
     print("\n" + "-" * 70)
-    print("Step 2: Approving BRD → triggering PE Agent...")
-    print("(This calls OpenAI again — expect another 30-60 seconds)\n")
+    print("Step 2: BRD approved → triggering PE Agent...")
+    print("(This calls OpenAI — expect 30-60 seconds)\n")
 
     pe_result = await orchestrator.handle_approval(
         project_name=PROJECT_NAME,
@@ -94,37 +145,83 @@ async def main():
         print(f"PE FAILED: {pe_result.get('message')}")
         return
 
-    print(f"PRD generated")
-    print(f"Stage    : {pe_result.get('stage')}")
-    print(f"Document : {pe_result.get('document_id')}")
+    prd_path = Path("projects") / PROJECT_NAME / "pe-output.md"
 
-    session = orchestrator.context_manager.get_session(PROJECT_NAME)
-    pe_output = session.get("pe_output", {})
+    while True:
+        print(f"PRD generated")
+        print(f"Stage    : {pe_result.get('stage')}")
+        print(f"Document : {pe_result.get('document_id')}")
 
-    prd_gates = pe_output.get("quality_gates", {})
-    print("\nPE Quality Gates:")
-    for gate, passed in prd_gates.items():
-        print(f"  {gate}: {'PASS' if passed else 'FAIL'}")
+        session = orchestrator.context_manager.get_session(PROJECT_NAME)
+        pe_output = session.get("pe_output", {})
 
-    overall = "PASS" if pe_output.get("quality_gates_passed") else "FAIL"
-    print(f"\nOverall PE: {overall}")
+        prd_gates = pe_output.get("quality_gates", {})
+        print("\nPE Quality Gates:")
+        for gate, passed in prd_gates.items():
+            print(f"  {gate}: {'PASS' if passed else 'FAIL'}")
 
-    prd_markdown = pe_result.get("output", "")
-    sources_count = pe_output.get("sources_verified_count", 0)
-    hallucination_risk = pe_output.get("sources_metadata", {}).get("data_integrity", {}).get("hallucination_risk", "unknown")
+        overall = "PASS" if pe_output.get("quality_gates_passed") else "FAIL"
+        print(f"\nOverall PE: {overall}")
 
-    print(f"\nPRD length        : {len(prd_markdown)} characters")
-    print(f"Sources verified  : {sources_count}")
-    print(f"Hallucination risk: {hallucination_risk.upper()}")
+        prd_markdown = pe_result.get("output", "")
+        sources_count = pe_output.get("sources_verified_count", 0)
+        hallucination_risk = pe_output.get("sources_metadata", {}).get("data_integrity", {}).get("hallucination_risk", "unknown")
 
-    has_prd_mermaid = "```mermaid" in prd_markdown
-    print(f"Mermaid diagrams  : {'YES - ' + str(prd_markdown.count('```mermaid')) + ' diagram(s)' if has_prd_mermaid else 'NO'}")
-    print(f"Verified refs     : {'YES' if 'Verified References' in prd_markdown else 'NO'}")
+        print(f"\nPRD length        : {len(prd_markdown)} characters")
+        print(f"Sources verified  : {sources_count}")
+        print(f"Hallucination risk: {hallucination_risk.upper()}")
 
-    print("\nPRD Preview (first 600 characters):")
-    print("-" * 70)
-    print(prd_markdown[:600])
-    print("...")
+        has_prd_mermaid = "```mermaid" in prd_markdown
+        print(f"Mermaid diagrams  : {'YES - ' + str(prd_markdown.count('```mermaid')) + ' diagram(s)' if has_prd_mermaid else 'NO'}")
+        print(f"Verified refs     : {'YES' if 'Verified References' in prd_markdown else 'NO'}")
+
+        print(f"\nFull PRD saved at: {prd_path.resolve()}")
+        print("Open that file and review it.")
+
+        decision = input("\nApprove PRD and finish? (type 'approve', or just describe what to change): ").strip()
+
+        if is_approval(decision):
+            done_result = await orchestrator.handle_approval(
+                project_name=PROJECT_NAME,
+                stage="pe",
+                decision="approve"
+            )
+            if done_result.get("status") != "success":
+                print(f"APPROVAL FAILED: {done_result.get('message')}")
+                return
+            break
+        else:
+            if decision.lower() in ("no", "n", "reject", "disapprove", "decline"):
+                feedback = input("What should change in the PRD? ").strip()
+            else:
+                feedback = decision
+
+            if not feedback:
+                print("Please type 'approve' or describe the changes you want.")
+                continue
+
+            clarify_result = await orchestrator.handle_approval(
+                project_name=PROJECT_NAME,
+                stage="pe",
+                decision="needs_changes"
+            )
+            if clarify_result.get("status") != "success":
+                print(f"CLARIFICATION FAILED: {clarify_result.get('message')}")
+                return
+
+            print("\nRegenerating PRD with your feedback...")
+            print("(This calls OpenAI — expect 30-60 seconds)\n")
+
+            rework_result = await orchestrator.handle_clarification_response(
+                project_name=PROJECT_NAME,
+                stage="pe",
+                responses={"feedback": feedback}
+            )
+            if rework_result.get("status") != "success":
+                print(f"PRD REWORK FAILED: {rework_result.get('message')}")
+                return
+
+            pe_result = rework_result
 
     if has_prd_mermaid:
         print("\nFirst Mermaid Diagram:")
