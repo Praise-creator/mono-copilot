@@ -15,8 +15,6 @@ Key design decisions:
 
 from typing import Optional, Dict
 from datetime import datetime
-import json
-from pathlib import Path
 import os
 import re
 from openai import AsyncOpenAI
@@ -45,7 +43,7 @@ The MNOs you work with are large. Not startup large. Carrier large.
 - 1000+ concurrent internal users (agents, analysts, ops)
 - 100M+ customer data points under management
 - Systems that cannot go down: IVR, billing, provisioning, CRM
-- Regulatory environments with real teeth: NCC in Nigeria, NCA in Ghana, CMA in Kenya, ICASA in South Africa, NTRA in Egypt
+- Regulatory environments with real teeth: NCC in Nigeria, NCA in Ghana, CA in Kenya, ICASA in South Africa, TRA in Egypt
 - Legacy infrastructure that will not be replaced — it must be integrated
 
 This means your PRD carries weight that a startup PRD does not. When you write "< 200ms p95", that number gets put into an SLA. When you write "fallback to cached data", an engineer designs a cache invalidation strategy around it. Write accordingly.
@@ -80,7 +78,9 @@ What will slow us down?
 Name the real risks with real mitigations. "CRM API extensions take 6+ weeks historically — if not ready by Week 4, agent portal falls back to manual lookup and latency target is missed."
 
 SOURCES:
-Government sources first: NCC (ncc.gov.ng), NCA (nca.org.gh), CMA (cma.or.ke), ICASA (icasa.org.za), NTRA (ntra.gov.eg).
+Government sources first: NCC (ncc.gov.ng), NCA (nca.org.gh), CA (ca.go.ke), ICASA (icasa.org.za), TRA (tra.gov.eg).
+Match the regulator to the ACTUAL country in the approved BRD — a Ghana project cites NCA, not NCC. Do not default to NCC/Nigeria out of habit.
+If NO country or market is stated anywhere in the BRD or problem statement, do NOT invent one — including in the Data Residency section. Write it generically instead (e.g. "jurisdiction not specified — confirm target market before finalizing data residency requirements") rather than asserting a specific country's compliance requirement as CONFIDENCE: HIGH.
 Industry benchmarks: GSMA Intelligence, Gartner, Statista, Forrester.
 Mark every estimate: CONFIDENCE: HIGH / MEDIUM / LOW.
 Do not invent data. If you do not know, say so and mark it LOW confidence."""
@@ -139,20 +139,17 @@ Do not invent data. If you do not know, say so and mark it LOW confidence."""
 
             quality_gates = self._check_quality_gates(markdown)
 
-            sources_metadata = await self._extract_and_verify_sources(
-                markdown, segment, problem_statement
+            sources_metadata = await self.research_service.extract_and_verify_sources(
+                markdown=markdown,
+                segment=segment,
+                problem_statement=problem_statement,
+                id_key="prd_id",
+                id_prefix="PRD",
             )
 
             enhanced_markdown = self._add_verified_footnotes(markdown, sources_metadata)
 
             quality_gates["mermaid_diagrams"] = self._validate_mermaid(enhanced_markdown)
-
-            Path("projects").mkdir(exist_ok=True)
-            prd_path = Path("projects") / "prd.md"
-            prd_path.write_text(enhanced_markdown)
-
-            sources_path = Path("projects") / "prd_sources.json"
-            sources_path.write_text(json.dumps(sources_metadata, indent=2, default=str))
 
             mandatory_gates = [
                 quality_gates.get("integration_architecture", False),
@@ -174,7 +171,6 @@ Do not invent data. If you do not know, say so and mark it LOW confidence."""
                 "approval_required": True,
                 "generated_at": datetime.now().isoformat(),
                 "run_count": run_count,
-                "file_path": str(prd_path),
                 "sources_verified_count": len(sources_metadata.get("sources_used", []))
             }
 
@@ -289,59 +285,6 @@ Include at minimum:
             if not any(sym in block for sym in ['->', '-->', '|']):
                 return False
         return True
-
-    async def _extract_and_verify_sources(
-        self,
-        markdown: str,
-        segment: str,
-        problem_statement: str
-    ) -> Dict:
-        """Government sources first, then industry. Mirrors ba_skill exactly."""
-
-        sources_used = []
-
-        government_keywords = ["ncc", "nca", "cma", "icasa", "ntra", "compliance", "regulation", "data residency"]
-        industry_keywords = ["gsma", "statista", "gartner", "forrester", "benchmark", "availability", "uptime"]
-
-        text_lower = markdown.lower()
-        problem_lower = problem_statement.lower()
-
-        for keyword in government_keywords + industry_keywords:
-            if keyword in text_lower or keyword in problem_lower:
-                search_result = await self.research_service.search_and_verify(keyword, segment)
-                if search_result.get("verified_sources"):
-                    for source in search_result["verified_sources"]:
-                        if source not in sources_used:
-                            sources_used.append(source)
-
-        sentences = re.split(r'(?<=[.!?])\s+', markdown)
-        for sentence in sentences[:10]:
-            if any(kw in sentence.lower() for kw in government_keywords + industry_keywords):
-                search_result = await self.research_service.search_and_verify(sentence, segment)
-                if search_result.get("verified_sources"):
-                    for source in search_result["verified_sources"]:
-                        if source not in sources_used:
-                            sources_used.append(source)
-
-        sources_metadata = {
-            "prd_id": f"PRD-{datetime.now().strftime('%Y%m%d')}",
-            "project_name": segment,
-            "generated_at": datetime.now().isoformat(),
-            "sources_used": sources_used,
-            "search_statistics": {
-                "total_searches": len(government_keywords + industry_keywords),
-                "sources_verified": len(sources_used),
-                "verification_coverage": "high" if len(sources_used) >= 3 else "medium" if len(sources_used) >= 1 else "low"
-            },
-            "data_integrity": {
-                "all_sources_verified": len(sources_used) >= 3,
-                "hallucination_risk": "low" if len(sources_used) >= 3 else "medium" if len(sources_used) >= 1 else "high",
-                "unresolved_conflicts": 0,
-                "manual_review_recommended": len(sources_used) == 0
-            }
-        }
-
-        return sources_metadata
 
     def _add_verified_footnotes(self, markdown: str, sources_metadata: Dict) -> str:
         """Add source footnotes. Mirrors ba_skill exactly."""

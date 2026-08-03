@@ -9,9 +9,10 @@ import asyncio
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent / "apps" / "copilot" / "src"))
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from copilot.orchestrator import Orchestrator
+from copilot.cli.approval_words import is_approval
 
 
 PROBLEM_STATEMENT = """
@@ -38,19 +39,6 @@ interactions must be logged and retained for regulatory audit.
 SEGMENT = "postpaid_consumer"
 PROJECT_NAME = "nigeria-churn-reduction-v1"
 USER_ID = "kb-test"
-
-APPROVAL_WORDS = {
-    "approve", "approved", "a", "yes", "y", "yeah", "yep", "sure",
-    "ok", "okay", "good", "great", "fine", "done", "finish", "finished",
-    "complete", "completed", "ship it", "lgtm", "looks good", "good to go",
-    "no changes", "no changes needed", "that's fine", "thats fine", "all good"
-}
-
-
-def is_approval(text: str) -> bool:
-    """Anything not clearly an approval word is treated as feedback."""
-    return text.strip().lower() in APPROVAL_WORDS
-
 
 async def main():
     print("\nFULL END-TO-END TEST: Problem Statement → BRD → PRD")

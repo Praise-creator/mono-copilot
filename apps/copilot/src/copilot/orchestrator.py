@@ -6,15 +6,19 @@ Handles: approval gates, quality checks, clarification feedback, deep dives
 """
 
 from enum import Enum
-from typing import Optional, Dict
+from typing import Optional, Dict, List
 from datetime import datetime
+import asyncio
 import json
+import re
 from pathlib import Path
 
 from .services.context_manager import ContextManager
 from .services.file_manager import FileManager
 from .agents.ba_agent import BAAgent
 from .agents.pe_agent import PEAgent
+from .agents.rfc_agent import RFCAgent
+from .skills.rfc_skill import RFC_ROLES, ROLE_ALIASES
 
 
 class OrchestratorState(Enum):
@@ -32,6 +36,12 @@ class OrchestratorState(Enum):
     PE_DEEP_DIVE = "pe_deep_dive"
     PE_FAILED = "pe_failed"
     PE_JUMP_BACK_TO_BA = "pe_jump_back_to_ba"
+    RFC_PENDING = "rfc_pending"
+    RFC_APPROVAL = "rfc_approval"
+    RFC_CLARIFYING = "rfc_clarifying"
+    RFC_REWORKING = "rfc_reworking"
+    RFC_DEEP_DIVE = "rfc_deep_dive"
+    RFC_FAILED = "rfc_failed"
     DONE = "done"
 
 
@@ -43,6 +53,7 @@ class Orchestrator:
         self.file_manager = FileManager()
         self.ba_agent = BAAgent()
         self.pe_agent = PEAgent()
+        self.rfc_agent = RFCAgent()
         self.max_reruns = 5
         self.max_attempts = 9
 
@@ -104,7 +115,8 @@ class Orchestrator:
                 }
 
             brd_markdown = ba_result.get("markdown", "")
-            self.file_manager.save_brd(project_name, brd_markdown)
+            brd_path = self.file_manager.save_brd(project_name, brd_markdown)
+            self.file_manager.save_sources(project_name, ba_result.get("sources_metadata", {}), filename="sources.json")
 
             self.context_manager.update_session(project_name, "ba_output", ba_result)
             self.context_manager.update_session(project_name, "stage", OrchestratorState.BA_APPROVAL.value)
@@ -120,6 +132,7 @@ class Orchestrator:
                 "stage": "ba_approval",
                 "document_id": ba_result.get("document_id"),
                 "output": brd_markdown,
+                "file_path": brd_path,
                 "approval_required": True,
                 "quality_gates": quality_gates,
                 "message": "BRD generated successfully. Awaiting approval."
@@ -184,7 +197,8 @@ class Orchestrator:
                         }
 
                     prd_markdown = pe_result.get("markdown", "")
-                    self.file_manager.save_prd(project_name, prd_markdown)
+                    prd_path = self.file_manager.save_prd(project_name, prd_markdown)
+                    self.file_manager.save_sources(project_name, pe_result.get("sources_metadata", {}), filename="prd-sources.json")
                     self.context_manager.update_session(project_name, "pe_output", pe_result)
                     self.context_manager.update_session(project_name, "stage", OrchestratorState.PE_APPROVAL.value)
 
@@ -199,7 +213,9 @@ class Orchestrator:
                         "stage": "pe_approval",
                         "document_id": pe_result.get("document_id"),
                         "output": prd_markdown,
+                        "file_path": prd_path,
                         "approval_required": True,
+                        "quality_gates": pe_result.get("quality_gates", {}),
                         "message": "PRD generated. Awaiting approval."
                     }
 
@@ -221,12 +237,40 @@ class Orchestrator:
                     }
 
                 if decision == "approve":
-                    self.context_manager.update_session(project_name, "stage", OrchestratorState.DONE.value)
-                    return {
-                        "status": "success",
-                        "stage": "done",
-                        "message": "Workflow complete. BRD and PRD approved."
-                    }
+                    self.context_manager.update_session(project_name, "stage", OrchestratorState.RFC_PENDING.value)
+
+                    pe_output = session.get("pe_output", {})
+                    rfc_run_counts = {role: 1 for role in RFC_ROLES}
+
+                    rfc_results = await self._generate_all_rfcs(
+                        project_name=project_name,
+                        prd_dict=pe_output,
+                    )
+
+                    self.context_manager.update_session(project_name, "rfc_outputs", rfc_results)
+                    self.context_manager.update_session(project_name, "rfc_run_counts", rfc_run_counts)
+
+                    if not any(r.get("status") == "success" for r in rfc_results.values()):
+                        self.context_manager.update_session(project_name, "stage", OrchestratorState.RFC_FAILED.value)
+                        return {
+                            "status": "error",
+                            "stage": "rfc_failed",
+                            "message": "All 5 RFC sub-agents failed to generate.",
+                            "errors": {role: r.get("error") for role, r in rfc_results.items()}
+                        }
+
+                    self.context_manager.update_session(project_name, "stage", OrchestratorState.RFC_APPROVAL.value)
+                    self.context_manager.add_to_history(
+                        project_name=project_name,
+                        stage="rfc",
+                        output=str(list(rfc_results.keys()))
+                    )
+
+                    return self._build_rfc_response(
+                        rfc_results,
+                        "All RFCs generated. Review and approve, or describe what needs to change "
+                        "(name the role, e.g. 'security: add MFA detail')."
+                    )
 
                 elif decision == "jump_back_to_ba":
                     self.context_manager.update_session(project_name, "stage", OrchestratorState.PE_JUMP_BACK_TO_BA.value)
@@ -243,6 +287,35 @@ class Orchestrator:
                         "stage": "pe_clarifying",
                         "questions": self._get_clarification_questions("pe"),
                         "message": "Please provide feedback to improve the PRD."
+                    }
+
+            elif stage == "rfc":
+                if current_stage != OrchestratorState.RFC_APPROVAL.value:
+                    return {
+                        "status": "error",
+                        "message": f"Cannot approve RFCs at stage {current_stage}",
+                        "stage": current_stage
+                    }
+
+                if decision == "approve":
+                    self.context_manager.update_session(project_name, "stage", OrchestratorState.DONE.value)
+                    markdown_dir = self.file_manager.get_markdown_dir(project_name)
+                    return {
+                        "status": "success",
+                        "stage": "done",
+                        "message": "Workflow complete. BRD, PRD, and all 5 RFCs approved. "
+                                   "Ready for ADR synthesis (out of scope here — see "
+                                   f"{markdown_dir}/ for the RFC files, or get_rfc_tools() "
+                                   "for the tool-exposed versions)."
+                    }
+
+                elif decision in ["needs_changes", "clarification"]:
+                    self.context_manager.update_session(project_name, "stage", OrchestratorState.RFC_CLARIFYING.value)
+                    return {
+                        "status": "success",
+                        "stage": "rfc_clarifying",
+                        "questions": self._get_clarification_questions("rfc"),
+                        "message": "Please specify which RFC(s) need changes and what should change."
                     }
 
             return {
@@ -313,7 +386,8 @@ class Orchestrator:
                         }
 
                 brd_markdown = ba_result.get("markdown", "")
-                self.file_manager.save_brd(project_name, brd_markdown)
+                brd_path = self.file_manager.save_brd(project_name, brd_markdown)
+                self.file_manager.save_sources(project_name, ba_result.get("sources_metadata", {}), filename="sources.json")
                 self.context_manager.update_session(project_name, "ba_output", ba_result)
                 self.context_manager.update_session(project_name, "stage", OrchestratorState.BA_APPROVAL.value)
                 self.context_manager.add_to_history(project_name, "ba_rework", brd_markdown, feedback)
@@ -323,6 +397,7 @@ class Orchestrator:
                     "stage": "ba_approval",
                     "document_id": ba_result.get("document_id"),
                     "output": brd_markdown,
+                    "file_path": brd_path,
                     "quality_gates": ba_result.get("quality_gates", {}),
                     "quality_gates_passed": ba_result.get("quality_gates_passed", False),
                     "run_number": current_run,
@@ -356,7 +431,8 @@ class Orchestrator:
                         }
 
                 prd_markdown = pe_result.get("markdown", "")
-                self.file_manager.save_prd(project_name, prd_markdown)
+                prd_path = self.file_manager.save_prd(project_name, prd_markdown)
+                self.file_manager.save_sources(project_name, pe_result.get("sources_metadata", {}), filename="prd-sources.json")
                 self.context_manager.update_session(project_name, "pe_output", pe_result)
                 self.context_manager.update_session(project_name, "stage", OrchestratorState.PE_APPROVAL.value)
                 self.context_manager.add_to_history(project_name, "pe_rework", prd_markdown, feedback)
@@ -366,11 +442,88 @@ class Orchestrator:
                     "stage": "pe_approval",
                     "document_id": pe_result.get("document_id"),
                     "output": prd_markdown,
+                    "file_path": prd_path,
                     "quality_gates": pe_result.get("quality_gates", {}),
                     "quality_gates_passed": pe_result.get("quality_gates_passed", False),
                     "run_number": current_run,
                     "message": f"PRD updated (attempt {current_run}). Review and approve or provide more feedback."
                 }
+
+            elif stage == "rfc" and current_stage == OrchestratorState.RFC_CLARIFYING.value:
+                target_roles = self._match_roles_in_feedback(feedback)
+
+                if not target_roles:
+                    # Ambiguous feedback that can't be attributed to a role is
+                    # a reason to ask, not to guess and rework the wrong RFC.
+                    self.context_manager.update_session(project_name, "stage", OrchestratorState.RFC_APPROVAL.value)
+                    return {
+                        "status": "error",
+                        "message": "Could not tell which RFC(s) your feedback targets. "
+                                   "Please name the role explicitly, e.g. "
+                                   "'security: add key rotation detail' or 'ui/ux: missing empty states'.",
+                        "stage": OrchestratorState.RFC_APPROVAL.value
+                    }
+
+                self.context_manager.update_session(project_name, "stage", OrchestratorState.RFC_REWORKING.value)
+
+                rfc_run_counts = session.get("rfc_run_counts") or {role: 1 for role in RFC_ROLES}
+                rfc_outputs = session.get("rfc_outputs", {})
+
+                failed_roles = []
+                deep_dive_roles = []
+                feedback_by_role = {}
+                reworkable_roles = []
+
+                for role in target_roles:
+                    new_count = rfc_run_counts.get(role, 1) + 1
+                    if new_count > self.max_attempts:
+                        failed_roles.append(role)
+                        continue
+                    rfc_run_counts[role] = new_count
+                    feedback_by_role[role] = feedback
+                    reworkable_roles.append(role)
+                    if new_count == self.max_reruns + 1:
+                        deep_dive_roles.append(role)
+
+                self.context_manager.update_session(project_name, "rfc_run_counts", rfc_run_counts)
+
+                if reworkable_roles:
+                    prd_dict = session.get("pe_output", {})
+                    new_results = await self._generate_all_rfcs(
+                        project_name=project_name,
+                        prd_dict=prd_dict,
+                        roles=reworkable_roles,
+                        run_counts=rfc_run_counts,
+                        feedback_by_role=feedback_by_role,
+                    )
+                    rfc_outputs.update(new_results)
+
+                self.context_manager.update_session(project_name, "rfc_outputs", rfc_outputs)
+                self.context_manager.update_session(project_name, "stage", OrchestratorState.RFC_APPROVAL.value)
+                self.context_manager.add_to_history(project_name, "rfc_rework", str(reworkable_roles), feedback)
+
+                message_parts = []
+                if reworkable_roles:
+                    message_parts.append(f"Reworked: {', '.join(reworkable_roles)}")
+                if "software_architect" in reworkable_roles:
+                    message_parts.append(
+                        "Note: system-design changed — the other RFCs may now reference "
+                        "outdated component names. Consider reworking them too if this was significant."
+                    )
+                if deep_dive_roles:
+                    message_parts.append(
+                        f"Entering deep dive for: {', '.join(deep_dive_roles)} — "
+                        "provide more detailed feedback next time."
+                    )
+                if failed_roles:
+                    message_parts.append(
+                        f"FAILED after {self.max_attempts} attempts, needs manual attention: "
+                        f"{', '.join(failed_roles)}"
+                    )
+
+                response = self._build_rfc_response(rfc_outputs, " | ".join(message_parts) or "RFCs updated.")
+                response["run_counts"] = rfc_run_counts
+                return response
 
             return {
                 "status": "error",
@@ -399,4 +552,119 @@ class Orchestrator:
                 "Any constraints on technology choices?",
                 "What disaster recovery strategy should we use?"
             ]
+        elif stage == "rfc":
+            return [
+                "Which RFC(s) need changes? Name the role explicitly "
+                "(ui/ux, software architect / system design, security, qa, devops).",
+                "What specifically should change in that RFC?"
+            ]
         return []
+
+    def _contains_keyword(self, text: str, keyword: str) -> bool:
+        """Word-boundary match, same discipline as research_service.py's
+        _contains_keyword — short role aliases like "qa" or "ux" need a word
+        boundary or they'd match inside unrelated words."""
+        return re.search(r"\b" + re.escape(keyword) + r"\b", text) is not None
+
+    def _match_roles_in_feedback(self, feedback: str) -> List[str]:
+        """Which RFC role(s) a piece of free-text feedback is targeting, by
+        alias match. Returns an empty list rather than guessing when nothing
+        matches — ambiguous feedback should be asked about again, not
+        silently applied to the wrong (or every) role."""
+        feedback_lower = feedback.lower()
+        matched = []
+        for role in RFC_ROLES:
+            for alias in ROLE_ALIASES.get(role, ()):
+                if self._contains_keyword(feedback_lower, alias):
+                    matched.append(role)
+                    break
+        return matched
+
+    async def _generate_all_rfcs(
+        self,
+        project_name: str,
+        prd_dict: Dict,
+        roles: Optional[List[str]] = None,
+        run_counts: Optional[Dict[str, int]] = None,
+        feedback_by_role: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, Dict]:
+        """
+        Generate RFCs for the given roles (default: all 5). software_architect
+        always runs first, not concurrently with the rest — the other 4
+        roles' prompts reference "the system-design RFC's real component
+        names", and that reference is only real if system-design has already
+        been generated. True 5-way concurrency would mean Security/QA/DevOps
+        claim to reference a document that doesn't exist yet. See
+        rfc_skill.py's module docstring for the full reasoning.
+
+        Persists every successful result to disk (projects/{name}/adr/) and
+        adds "file_path" to each result dict before returning.
+        """
+        target_roles = roles if roles is not None else list(RFC_ROLES)
+        run_counts = run_counts or {}
+        feedback_by_role = feedback_by_role or {}
+
+        results: Dict[str, Dict] = {}
+        system_design_context: Optional[str] = None
+
+        if "software_architect" in target_roles:
+            sa_result = await self.rfc_agent.run(
+                role="software_architect",
+                prd_dict=prd_dict,
+                clarification_feedback=feedback_by_role.get("software_architect"),
+                run_count=run_counts.get("software_architect", 1),
+            )
+            results["software_architect"] = sa_result
+            if sa_result.get("status") == "success":
+                system_design_context = sa_result.get("markdown")
+        else:
+            # Not being (re)generated this round — reuse whatever's already
+            # on disk as cross-reference context for the roles that are.
+            system_design_context = self.file_manager.load_rfc(project_name, "software_architect")
+
+        remaining_roles = [r for r in target_roles if r != "software_architect"]
+
+        async def _run_role(role: str) -> Dict:
+            return await self.rfc_agent.run(
+                role=role,
+                prd_dict=prd_dict,
+                system_design_context=system_design_context,
+                clarification_feedback=feedback_by_role.get(role),
+                run_count=run_counts.get(role, 1),
+            )
+
+        if remaining_roles:
+            gathered = await asyncio.gather(*(_run_role(r) for r in remaining_roles))
+            for role, result in zip(remaining_roles, gathered):
+                results[role] = result
+
+        for role, result in results.items():
+            if result.get("status") == "success":
+                path = self.file_manager.save_rfc(project_name, role, result["markdown"])
+                self.file_manager.save_rfc_sources(project_name, role, result.get("sources_metadata", {}))
+                result["file_path"] = path
+
+        return results
+
+    def _build_rfc_response(self, rfc_results: Dict[str, Dict], message: str) -> Dict:
+        """Combined view of all RFCs currently in play, for the single
+        rfc_approval review — one gate for all 5 rather than five separate
+        approval loops (see the private planning notes for why)."""
+        quality_gates_by_role = {role: r.get("quality_gates", {}) for role, r in rfc_results.items()}
+        gates_passed_by_role = {role: r.get("quality_gates_passed", False) for role, r in rfc_results.items()}
+        file_paths = {role: r.get("file_path") for role, r in rfc_results.items() if r.get("file_path")}
+        errors = {role: r.get("error") for role, r in rfc_results.items() if r.get("status") == "error"}
+        outputs = {role: r.get("markdown") for role, r in rfc_results.items() if r.get("status") == "success"}
+
+        return {
+            "status": "success" if not errors else "partial_success",
+            "stage": "rfc_approval",
+            "rfc_outputs": outputs,
+            "file_paths": file_paths,
+            "quality_gates_by_role": quality_gates_by_role,
+            "quality_gates_passed_by_role": gates_passed_by_role,
+            "quality_gates_passed": bool(gates_passed_by_role) and all(gates_passed_by_role.values()) and not errors,
+            "errors": errors,
+            "approval_required": True,
+            "message": message,
+        }
