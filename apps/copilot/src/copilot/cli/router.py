@@ -35,7 +35,7 @@ would work only by coincidence of which route a question happened to take:
 Bare (non-'/ask') text inside an active project is deliberately NOT treated
 as a question. At an approval gate that text is review feedback, and quietly
 reinterpreting it would turn "the exception handling is thin" from a rework
-request into a chat reply — silently dropping the user's actual instruction.
+request into a chat reply, silently dropping the user's actual instruction.
 Explicit '/ask' is the escape hatch, and it is the only one.
 """
 
@@ -85,7 +85,7 @@ def _parse_ask_command(text: str) -> Optional[str]:
     """
     The question inside an '/ask' command, or None if this isn't one.
 
-    Returns an empty string for a bare '/ask' with nothing after it — which
+    Returns an empty string for a bare '/ask' with nothing after it, which
     is a real case ("how do I use this?") and distinct from "not an /ask
     command at all". Callers must therefore test `is not None` rather than
     truthiness, since "" is a valid, meaningful result here.
@@ -110,7 +110,7 @@ class RouterResult:
     or agent actually ran underneath. `kind` tells the caller how to render
     it; `data` carries whatever payload is relevant for that kind."""
     # "answer" is its own kind rather than a plain "message" so a richer
-    # surface can render Q&A differently from workflow output — different
+    # surface can render Q&A differently from workflow output: different
     # styling, a collapsible source list, whatever suits it. Renderers that
     # don't know the kind still print .message and behave correctly, so
     # adding it breaks nothing that already consumes RouterResult.
@@ -334,7 +334,7 @@ class Router:
 
         if decision.path == EntryPath.AD_HOC_QUESTION:
             # The intake model can choose this independently of the rule-based
-            # classifier — ad_hoc_question is in its decidable set. Handling it
+            # classifier, since ad_hoc_question is in its decidable set. Handling it
             # only in _start_classification would have left this route quietly
             # dead-ending on "not wired yet" for anyone whose phrasing happened
             # to need a clarifying turn first.
@@ -585,7 +585,7 @@ class Router:
             return RouterResult(
                 kind="message",
                 message=(
-                    "Add a question after /ask — for example '/ask what does ARPU mean?' "
+                    "Add a question after /ask, for example '/ask what does ARPU mean?' "
                     "or '/ask what does the BRD say about churn?'."
                 ),
                 active_project=self.active_project,
@@ -635,7 +635,7 @@ class Router:
 
         Reads straight from the session rather than from disk so an answer
         reflects the document currently under review, including reworks that
-        haven't been re-approved yet — the version on screen is the version
+        haven't been re-approved yet. The version on screen is the version
         the user is asking about.
 
         RFC markdown is deliberately left out. Five more documents would
@@ -663,7 +663,7 @@ class Router:
         Render citations with their strength stated accurately.
 
         The header wording is deliberate. These are whitelist matches on
-        topic keywords, not per-sentence verification — ResearchService does
+        topic keywords, not per-sentence verification. ResearchService does
         not perform web search today. Labelling them "verified" would read as
         a much stronger claim than the data supports, in a tool whose output
         feeds real compliance documents. Naming the matched keyword lets the
@@ -698,7 +698,7 @@ class Router:
         so a false positive is expensive: the user's review comment is
         answered with a PDF and never reaches the document. A plain substring
         test made that easy to trigger, because these are ordinary words in
-        telecom requirements writing —
+        telecom requirements writing:
 
             "we should save this data for 90 days per regulation"
             "add a section on how we export customer records"
@@ -720,7 +720,7 @@ class Router:
         if any(text_lower.startswith(starter) for starter in _EXPORT_REQUEST_STARTERS):
             return True
 
-        # A bare fragment is unambiguous — nobody types "pdf" as feedback on
+        # A bare fragment is unambiguous. Nobody types "pdf" as feedback on
         # a document. Word-boundary matched so "downloads" or "exported"
         # inside a longer word can't trigger it.
         if len(text_lower.split()) <= _MAX_BARE_EXPORT_WORDS:
@@ -785,7 +785,7 @@ class Router:
         # fail for reasons that have nothing to do with the document being
         # exported. A full disk is the one that actually bit us, and because
         # this loop had no handling, the exception unwound out of
-        # handle_input and terminated the interactive session — discarding
+        # handle_input and terminated the interactive session, discarding
         # the files that had already been written successfully and telling
         # the user nothing about them.
         #

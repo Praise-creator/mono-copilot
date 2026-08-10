@@ -1,12 +1,12 @@
 """
-Chat Skill — free-form Q&A that sits alongside the document pipeline rather
+Chat Skill: free-form Q&A that sits alongside the document pipeline rather
 than inside it.
 
 Every other skill in this package (ba_skill, pe_skill, rfc_skill) exists to
 produce one specific document at one specific stage of the state machine.
 This one doesn't produce anything the Orchestrator tracks: it answers a
 question and returns. That's why there's no ChatAgent wrapper next to
-BAAgent/PEAgent/RFCAgent — those wrappers exist because the Orchestrator
+BAAgent/PEAgent/RFCAgent. Those wrappers exist because the Orchestrator
 drives them through a workflow. Nothing drives this, so cli/router.py calls
 it directly and the Orchestrator never learns it exists.
 
@@ -36,7 +36,7 @@ or change a project's stage. Asking a question must always be safe.
 
 WHAT "SOURCE-GROUNDED" HONESTLY MEANS HERE
 ------------------------------------------
-ResearchService is keyword-to-whitelist matching, not web search — its own
+ResearchService is keyword-to-whitelist matching, not web search. Its own
 docstring flags real search as Phase 2 work that hasn't happened. So a
 source attached to an answer means "this domain is an authorized reference
 for a topic this answer touches", NOT "this specific sentence was checked
@@ -76,7 +76,7 @@ The trade-off accepted here is real and worth stating: turbo is slower, and
 this is a conversational feature where that will be noticeable. Answer
 quality on long documents was judged the more important of the two. If Q&A
 in practice turns out to be mostly short definitional questions rather than
-document questions, revisiting this is reasonable — change MODEL below.
+document questions, revisiting this is reasonable. Change MODEL below.
 """
 
 from datetime import datetime
@@ -88,7 +88,7 @@ from openai import AsyncOpenAI
 from ..services.research_service import ResearchService
 
 
-MODEL = "gpt-4-turbo"  # matches ba_skill.py/pe_skill.py/rfc_skill.py — see module docstring
+MODEL = "gpt-4-turbo"  # matches ba_skill.py/pe_skill.py/rfc_skill.py, see module docstring
 
 # Chat answers are meant to be read in a terminal, in the middle of doing
 # something else. This ceiling keeps them at "helpful paragraph" length
@@ -98,7 +98,7 @@ MAX_TOKENS = 900
 # How many prior Q&A pairs travel with each request, so follow-ups like
 # "what about Ghana?" resolve against what was just discussed. Capped
 # because every retained turn is re-sent (and re-billed) on every
-# subsequent question — unbounded history quietly turns a cheap feature
+# subsequent question. Unbounded history quietly turns a cheap feature
 # into an expensive one.
 MAX_HISTORY_TURNS = 6
 
@@ -126,7 +126,7 @@ def _format_excerpt(label: str, markdown: Optional[str]) -> Optional[str]:
     if len(body) > MAX_DOC_EXCERPT_CHARS:
         body = (
             body[:MAX_DOC_EXCERPT_CHARS].rstrip()
-            + f"\n\n[...truncated — this is the first {MAX_DOC_EXCERPT_CHARS} "
+            + f"\n\n[...truncated. This is the first {MAX_DOC_EXCERPT_CHARS} "
             "characters only. If the answer depends on a later section, say so "
             "rather than assuming the section is absent.]"
         )
@@ -185,7 +185,7 @@ class ChatSkill:
             sources_block = (
                 "NO AUTHORIZED SOURCES matched this topic. Answer from general "
                 "knowledge and say so. Do not cite any URL, report, or "
-                "publication — there is nothing verified to cite here."
+                "publication. There is nothing verified to cite here."
             )
 
         return f"""You are the assistant inside Mono-Copilot, a product-development tool for \
@@ -200,7 +200,7 @@ and asking something, not as a request for a document.
 
 HOW TO ANSWER:
 - Lead with the answer. No preamble, no restating the question.
-- Markdown, and keep it tight — a short paragraph or a few bullets. Only go longer if \
+- Markdown, and keep it tight: a short paragraph or a few bullets. Only go longer if \
 the question genuinely needs it.
 - If project context is provided below, prefer it for anything asking about "we", "this \
 project", "the BRD", or "the PRD". Quote the document rather than paraphrasing when the \
@@ -213,7 +213,7 @@ WHAT YOU MUST NOT DO:
 have a verified figure for that" is correct and useful; a plausible invented number is a \
 serious error that could end up in a real document.
 - Do not name a regulator unless the country is actually established. Nigeria is the NCC, \
-Ghana the NCA, Kenya the CA, South Africa ICASA, Egypt the NTRA — never default to one out \
+Ghana the NCA, Kenya the CA, South Africa ICASA, Egypt the NTRA. Never default to one out \
 of habit when no country was stated.
 - Do not claim a document says something you cannot see in the provided context.
 - Say "I don't know" when you don't know. That is an acceptable, expected answer here.
@@ -293,7 +293,7 @@ of habit when no country was stated.
         behind it, despite the name suggesting otherwise.
 
         Dedup matters for the same reason research_service.py dedups
-        internally — a telecom answer naturally repeats "regulation",
+        internally. A telecom answer naturally repeats "regulation",
         "regulatory" and "compliance", and without this the same two URLs
         would be listed five times and read as far more corroboration than
         actually exists.
@@ -345,7 +345,7 @@ of habit when no country was stated.
 
         The answer markdown deliberately excludes any rendered source list.
         Sources come back structured so each caller formats them for its own
-        surface — a terminal footer and a TUI side panel want very different
+        surface. A terminal footer and a TUI side panel want very different
         things, and baking one into the text would force the other to parse
         it back out.
         """
@@ -398,8 +398,8 @@ of habit when no country was stated.
         except Exception as e:
             # A failed question must never take down the session around it.
             # Router surfaces this as an ordinary message and the user carries
-            # on with whatever workflow they were in the middle of — an
-            # unavailable side feature is an inconvenience, losing an
+            # on with whatever workflow they were in the middle of. An
+            # unavailable side feature is an inconvenience; losing an
             # in-progress BRD review to an unhandled exception is not.
             return {
                 "status": "error",

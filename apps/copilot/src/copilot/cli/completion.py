@@ -9,7 +9,7 @@ matches on equality:
     exact_match = next((p for p in self.existing_projects if p.lower() == text_lower), None)
 
 There is no fuzzy match and no "did you mean". So "upsell-assit" does not
-near-miss "upsell-assist" — it fails to match anything, falls through to the
+near-miss "upsell-assist". It fails to match anything, falls through to the
 length checks, lands on AMBIGUOUS_NEEDS_CLARIFICATION, and starts an
 IntakeAgent conversation. That is a real API call, spent asking the user what
 they meant about a project sitting on disk the whole time.
@@ -17,7 +17,7 @@ they meant about a project sitting on disk the whole time.
 Tab completion removes that path entirely: a name you complete is a name you
 cannot typo.
 
-Importing readline also upgrades input() for free — arrow-key line editing
+Importing readline also upgrades input() for free: arrow-key line editing
 and in-session history (up-arrow to recall a previous input), neither of
 which the plain input() loop had.
 
@@ -42,7 +42,7 @@ the app on startup.
 
 On macOS, Python links against libedit rather than GNU readline, and the two
 take different binding syntax. The widely-copied `parse_and_bind("tab:
-complete")` silently does nothing under libedit — no error, no completion,
+complete")` silently does nothing under libedit, with no error and no completion,
 which is a genuinely confusing way to fail. Both bindings are applied below.
 """
 
@@ -52,20 +52,20 @@ try:
     import readline
 except ImportError:
     # Windows, or any build without the module. Completion is a convenience,
-    # never a requirement — the session must run exactly as before without it.
+    # never a requirement. The session must run exactly as before without it.
     readline = None
 
 
 # Commands worth suggesting. Deliberately excludes "/rfc", which
-# entry_classifier.py recognises but router.py still reports as not wired —
-# offering it would advertise a dead end.
+# entry_classifier.py recognises but router.py still reports as not wired.
+# Offering it would advertise a dead end.
 SLASH_COMMANDS = ("/ask", "/new", "/switch", "/resume", "/quit", "/exit")
 
 # Commands that take a project name as their argument.
 _PROJECT_ARG_COMMANDS = ("/switch", "/resume")
 
 # Offered while a document is waiting at an approval gate. Short, common
-# phrasings only — this is a nudge toward what is possible at this moment,
+# phrasings only. This is a nudge toward what is possible at this moment,
 # not an attempt to write the user's feedback for them.
 _APPROVAL_SUGGESTIONS = ("approve", "looks good", "export as pdf")
 
@@ -80,7 +80,7 @@ def _project_names(router) -> List[str]:
     Uses list_resumable_projects() (backed by .session.json) rather than
     every folder under projects/. A folder without a session file resolves to
     RESUME_FROM_DISK_NO_SESSION, which then fails to load and reports "Could
-    not load session state" — completing to a name that cannot actually be
+    not load session state". Completing to a name that cannot actually be
     opened would be worse than offering nothing.
 
     Read fresh on each Tab rather than cached at startup, so a project created
@@ -110,7 +110,7 @@ def completion_candidates(router, line: str, word: str) -> List[str]:
     Everything that could sensibly follow, given where the session is.
 
     Args:
-        router: the live Router — read for active project and stage.
+        router: the live Router, read for active project and stage.
         line: the full input line typed so far.
         word: the whitespace-delimited token currently being completed.
 
@@ -123,7 +123,7 @@ def completion_candidates(router, line: str, word: str) -> List[str]:
     stripped = line.lstrip()
     lowered = stripped.lower()
 
-    # "/switch upse<TAB>" — the argument to these is always a project name,
+    # "/switch upse<TAB>". The argument to these is always a project name,
     # so nothing else belongs in the list.
     for command in _PROJECT_ARG_COMMANDS:
         if lowered.startswith(command + " "):
@@ -190,7 +190,7 @@ def setup_completion(router) -> bool:
     """
     Turn on tab completion for input(). Safe to call unconditionally.
 
-    Returns True if completion was activated, False if it could not be — no
+    Returns True if completion was activated, False if it could not be: no
     readline module, or a terminal that rejected the binding. Callers may use
     the result to mention completion in a startup hint, but nothing depends
     on it.
