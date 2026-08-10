@@ -29,6 +29,7 @@ load_dotenv(Path(__file__).parent.parent.parent.parent / ".env")
 
 from copilot.orchestrator import Orchestrator
 from copilot.cli.router import Router
+from copilot.cli.completion import setup_completion
 from copilot.cli.loading_messages import LoadingAnimator, BA_MESSAGES, PE_MESSAGES, RFC_MESSAGES
 
 
@@ -58,14 +59,20 @@ def _pick_loading_messages(router: Router) -> list:
 async def main():
     print("Mono-Copilot — interactive session")
     print("Type a business idea to start a new project, or an existing project name to resume it.")
-    print("Commands: /new (start fresh), /switch <name> (switch project), /quit\n")
+    print("Commands: /new (start fresh), /switch <name> (switch project), /ask <question>, /quit")
 
     orchestrator = Orchestrator()
     router = Router(orchestrator, user_id="kb-interactive")
 
+    # Hooks into the input() calls below at the interpreter level, so the
+    # prompt loop itself needs no changes. Returns False on platforms without
+    # readline (Windows), where the session runs exactly as it did before.
+    completion_enabled = setup_completion(router)
+    print("Tab completes project names and commands." if completion_enabled else "")
+
     resumable = router.list_resumable_projects()
     if resumable:
-        print(f"Resumable projects: {', '.join(resumable)}\n")
+        print(f"\nResumable projects: {', '.join(resumable)}\n")
 
     while True:
         try:
