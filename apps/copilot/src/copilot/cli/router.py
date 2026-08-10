@@ -725,9 +725,49 @@ class Router:
         if not targets:
             return RouterResult(kind="message", message="Nothing to export yet — no approved document exists for this project.", active_project=self.active_project)
 
-        paths = []
-        for doc_name, markdown in targets:
-            path = export_document(self.active_project, doc_name, markdown)
-            paths.append(f"{doc_name} -> {path}")
+        # Each document is exported independently, because one failing must
+        # not cost the user the others — or the session itself.
+        #
+        # "export everything as pdf" on a finished project renders seven
+        # documents in a row, and PDF rendering reaches outside the process:
+        # a temp directory, a system font/layout library, a file write. Those
+        # fail for reasons that have nothing to do with the document being
+        # exported. A full disk is the one that actually bit us, and because
+        # this loop had no handling, the exception unwound out of
+        # handle_input and terminated the interactive session — discarding
+        # the files that had already been written successfully and telling
+        # the user nothing about them.
+        #
+        # Partial success is the honest outcome to report here: name what was
+        # written, name what wasn't and why, and let the session continue.
+        exported: List[str] = []
+        failures: List[str] = []
 
-        return RouterResult(kind="export_ready", message="\n".join(paths), data={"paths": paths}, active_project=self.active_project)
+        for doc_name, markdown in targets:
+            try:
+                path = export_document(self.active_project, doc_name, markdown)
+                exported.append(f"{doc_name} -> {path}")
+            except Exception as e:
+                failures.append(f"{doc_name}: {e}")
+
+        if not exported:
+            return RouterResult(
+                kind="error",
+                message="Could not export anything:\n" + "\n".join(f"  {f}" for f in failures),
+                data={"paths": [], "failed": failures},
+                active_project=self.active_project,
+            )
+
+        message = "\n".join(exported)
+        if failures:
+            message += (
+                f"\n\nFailed ({len(failures)} of {len(targets)}):\n"
+                + "\n".join(f"  {f}" for f in failures)
+            )
+
+        return RouterResult(
+            kind="export_ready",
+            message=message,
+            data={"paths": exported, "failed": failures},
+            active_project=self.active_project,
+        )
