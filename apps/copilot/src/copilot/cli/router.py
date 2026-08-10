@@ -56,6 +56,19 @@ from ..services.pdf_export import export_document
 
 _EXPORT_KEYWORDS = ("export", "pdf", "download", "save a copy", "save this", "give me a copy", "give me the file")
 
+# Phrasings that open a genuine request for a file. Anchored to the start of
+# the input, which is what separates "export the brd" (a request) from "add a
+# note about how we export records" (feedback that mentions the same word).
+_EXPORT_REQUEST_STARTERS = (
+    "export", "download", "save a copy", "save this", "save it",
+    "give me a copy", "give me the file", "give me the pdf",
+    "can i get", "can i have", "get me", "send me", "print",
+)
+
+# Short enough that the whole input is the request. "pdf" and "as pdf" are
+# real things people type; a six-word sentence mentioning "download" is not.
+_MAX_BARE_EXPORT_WORDS = 3
+
 _ASK_COMMAND = "/ask"
 
 # Q&A turns retained per session. ChatSkill enforces its own ceiling on what
@@ -677,8 +690,46 @@ class Router:
     # ------------------------------------------------------------------
 
     def _is_export_request(self, text: str) -> bool:
-        text_lower = text.lower()
-        return any(kw in text_lower for kw in _EXPORT_KEYWORDS)
+        """
+        True only when the text is asking for an export, rather than merely
+        containing a word like "export" or "download".
+
+        This check runs before approval feedback in _handle_within_project,
+        so a false positive is expensive: the user's review comment is
+        answered with a PDF and never reaches the document. A plain substring
+        test made that easy to trigger, because these are ordinary words in
+        telecom requirements writing —
+
+            "we should save this data for 90 days per regulation"
+            "add a section on how we export customer records"
+            "the download speed metrics are missing"
+
+        were all read as export requests, silently discarding real feedback.
+
+        The rule now: an export request either opens with an export verb
+        ("export the brd", "give me a copy", "can i get the prd as a pdf") or
+        is a bare fragment of two or three words ("pdf", "as pdf"). Feedback
+        that happens to mention exporting later in a sentence no longer
+        qualifies. Same discipline as approval_words.py, which solved this
+        exact problem for approval detection.
+        """
+        text_lower = text.strip().lower()
+        if not text_lower:
+            return False
+
+        if any(text_lower.startswith(starter) for starter in _EXPORT_REQUEST_STARTERS):
+            return True
+
+        # A bare fragment is unambiguous — nobody types "pdf" as feedback on
+        # a document. Word-boundary matched so "downloads" or "exported"
+        # inside a longer word can't trigger it.
+        if len(text_lower.split()) <= _MAX_BARE_EXPORT_WORDS:
+            return any(
+                re.search(r"\b" + re.escape(kw) + r"\b", text_lower)
+                for kw in _EXPORT_KEYWORDS
+            )
+
+        return False
 
     async def _handle_export(self, text: str, session: Dict) -> RouterResult:
         text_lower = text.lower()
