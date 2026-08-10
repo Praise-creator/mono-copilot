@@ -16,12 +16,27 @@ BA -> PE -> RFC -> export as one continuous, resumable session, using the
 already-existing EntryClassifier and IntakeAgent for "what does this input
 mean" and Orchestrator for "make it happen." It does NOT build entry points
 entry_classifier.py itself already marks unfinished or out of scope —
-AD_HOC_QUESTION (no chat_skill.py exists), STANDALONE_FROM_PRD,
-STANDALONE_FROM_BRD_PE_NOT_WIRED, STANDALONE_RFC_REQUEST (all explicitly
-named "not wired" by the classifier's own design), or model-assisted
-classification (_classify_with_model is a deliberate NotImplementedError
-stub). Router surfaces all of these honestly as "not wired yet" rather than
-faking a result.
+STANDALONE_FROM_PRD, STANDALONE_FROM_BRD_PE_NOT_WIRED,
+STANDALONE_RFC_REQUEST (all explicitly named "not wired" by the classifier's
+own design), or model-assisted classification (_classify_with_model is a
+deliberate NotImplementedError stub). Router surfaces all of these honestly
+as "not wired yet" rather than faking a result.
+
+AD_HOC_QUESTION is the one that is now wired, via skills/chat_skill.py. It
+reaches this file three ways, and all three had to be handled or the feature
+would work only by coincidence of which route a question happened to take:
+
+  1. '/ask <question>' — explicit, works from anywhere including mid-intake.
+  2. EntryClassifier returning AD_HOC_QUESTION for short question-shaped
+     input typed with no project open.
+  3. IntakeAgent independently deciding ad_hoc_question, since that value is
+     in its decidable set and the model can pick it on its own.
+
+Bare (non-'/ask') text inside an active project is deliberately NOT treated
+as a question. At an approval gate that text is review feedback, and quietly
+reinterpreting it would turn "the exception handling is thin" from a rework
+request into a chat reply — silently dropping the user's actual instruction.
+Explicit '/ask' is the escape hatch, and it is the only one.
 """
 
 import re
@@ -35,10 +50,40 @@ from .approval_words import is_approval
 from .line_reference import resolve_line_reference
 from ..orchestrator import Orchestrator
 from ..skills.rfc_skill import RFC_ROLES, ROLE_DISPLAY_NAMES, ROLE_ALIASES
+from ..skills.chat_skill import ChatSkill
 from ..services.pdf_export import export_document
 
 
 _EXPORT_KEYWORDS = ("export", "pdf", "download", "save a copy", "save this", "give me a copy", "give me the file")
+
+_ASK_COMMAND = "/ask"
+
+# Q&A turns retained per session. ChatSkill enforces its own ceiling on what
+# it actually sends; this one bounds what Router holds in memory, so a long
+# session can't grow an unbounded transcript.
+_MAX_CHAT_HISTORY_TURNS = 6
+
+# Enough citations to be useful in a terminal footer without burying the
+# answer they belong to.
+_MAX_SOURCES_SHOWN = 5
+
+
+def _parse_ask_command(text: str) -> Optional[str]:
+    """
+    The question inside an '/ask' command, or None if this isn't one.
+
+    Returns an empty string for a bare '/ask' with nothing after it — which
+    is a real case ("how do I use this?") and distinct from "not an /ask
+    command at all". Callers must therefore test `is not None` rather than
+    truthiness, since "" is a valid, meaningful result here.
+    """
+    stripped = text.strip()
+    lowered = stripped.lower()
+    if lowered == _ASK_COMMAND:
+        return ""
+    if lowered.startswith(_ASK_COMMAND + " "):
+        return stripped[len(_ASK_COMMAND):].strip()
+    return None
 
 # Non-answer country/market phrasing that should still count as "resolved"
 # (not left blank, not invented) — same set the guided-start intake flow
@@ -51,7 +96,12 @@ class RouterResult:
     """Normalized shape every Router call returns, regardless of what stage
     or agent actually ran underneath. `kind` tells the caller how to render
     it; `data` carries whatever payload is relevant for that kind."""
-    kind: str  # "message" | "question" | "document_ready" | "resumed" | "export_ready" | "error"
+    # "answer" is its own kind rather than a plain "message" so a richer
+    # surface can render Q&A differently from workflow output — different
+    # styling, a collapsible source list, whatever suits it. Renderers that
+    # don't know the kind still print .message and behave correctly, so
+    # adding it breaks nothing that already consumes RouterResult.
+    kind: str  # "message" | "question" | "answer" | "document_ready" | "resumed" | "export_ready" | "error"
     message: str
     data: Optional[Dict] = None
     active_project: Optional[str] = None
@@ -99,9 +149,22 @@ class Router:
         self.user_id = user_id
         self.projects_dir = Path(projects_dir)
         self.classifier = EntryClassifier(orchestrator.context_manager, list_projects_on_disk(self.projects_dir))
+        self.chat_skill = ChatSkill()
         self.active_project: Optional[str] = None
         self._active_intake: Optional[IntakeAgent] = None
         self._pending_idea: Optional[_PendingNewIdea] = None
+
+        # Q&A transcript for this session, oldest first. Lives here rather
+        # than inside ChatSkill so there stays exactly one place session
+        # state is kept — the same reason active_project and _pending_idea
+        # are fields on Router instead of scattered across collaborators.
+        self._chat_history: List[Dict] = []
+
+        # The last question Router put to the user and hasn't had answered.
+        # Used to re-surface that question after an '/ask' detour, so asking
+        # something mid-setup doesn't leave the user staring at an answer
+        # with no memory of what they were originally being asked.
+        self._last_pending_question: Optional[str] = None
 
     def list_resumable_projects(self) -> List[str]:
         """Projects with real persisted session state — for a caller to
@@ -113,9 +176,44 @@ class Router:
     # ------------------------------------------------------------------
 
     async def handle_input(self, raw_input: str) -> RouterResult:
+        """
+        The one public entry point. Thin on purpose: it delegates the actual
+        decision to _dispatch and only records what was asked on the way out.
+
+        Tracking the pending question here, at the single point every result
+        passes through, avoids having to remember to set it at each of the
+        several places that ask one — the kind of bookkeeping that works
+        right up until someone adds a new question and forgets.
+        """
+        result = await self._dispatch(raw_input)
+
+        if result.kind == "question":
+            self._last_pending_question = result.message
+        elif result.kind != "answer":
+            # Anything that isn't a question and isn't an /ask detour means
+            # the conversation moved on, so nothing is outstanding anymore.
+            # "answer" is excluded precisely because it's the one result that
+            # leaves the previous question still hanging.
+            self._last_pending_question = None
+
+        return result
+
+    async def _dispatch(self, raw_input: str) -> RouterResult:
         text = raw_input.strip()
         if not text:
             return RouterResult(kind="message", message="(nothing to do with empty input)", active_project=self.active_project)
+
+        # '/ask' is checked before the multi-turn continuations below, which
+        # inverts the usual "answers to our own question win" rule — on
+        # purpose. The moment you most need to ask something is when you've
+        # just been asked a question you don't understand ("which segment is
+        # this for?"). If intake swallowed '/ask' as an answer, the feature
+        # would be unavailable exactly when it's most useful, and worse, the
+        # literal text "/ask what is a segment" would be recorded as the
+        # user's segment.
+        ask_question = _parse_ask_command(text)
+        if ask_question is not None:
+            return await self._handle_question(ask_question)
 
         # Mid multi-turn collection takes priority over everything else —
         # these are direct answers to Router's own last question, not fresh
@@ -162,20 +260,15 @@ class Router:
             self._active_intake = IntakeAgent(existing_projects=self.classifier.existing_projects)
             turn = await self._active_intake.send(text)
             if turn.is_final:
-                return await self._resolve_intake_decision(turn.decision)
+                return await self._resolve_intake_decision(turn.decision, text)
             question = turn.question or (result.clarification.question if result.clarification else "Can you say more?")
             return RouterResult(kind="question", message=question)
 
         if result.path == EntryPath.AD_HOC_QUESTION:
-            return RouterResult(
-                kind="message",
-                message=(
-                    "Ad-hoc Q&A isn't wired up in this build — it only covers the "
-                    "idea -> BRD -> PRD -> RFC -> export pipeline. Describe a "
-                    "business problem to start a new project, or name an existing "
-                    "one to resume it."
-                ),
-            )
+            # Reached without '/ask': short, question-shaped input typed with
+            # no project open. Safe to answer directly here because there is
+            # no workflow in progress for it to be mistaken for feedback.
+            return await self._handle_question(text)
 
         if result.path in (
             EntryPath.STANDALONE_FROM_PRD,
@@ -197,10 +290,16 @@ class Router:
         assert self._active_intake is not None
         turn = await self._active_intake.send(text)
         if turn.is_final:
-            return await self._resolve_intake_decision(turn.decision)
+            return await self._resolve_intake_decision(turn.decision, text)
         return RouterResult(kind="question", message=turn.question or "Can you say more?")
 
-    async def _resolve_intake_decision(self, decision: IntakeDecision) -> RouterResult:
+    async def _resolve_intake_decision(self, decision: IntakeDecision, user_text: str) -> RouterResult:
+        """
+        `user_text` is the message that triggered this decision. IntakeDecision
+        carries a clean idea_summary for the new-project path but nothing
+        equivalent for a question, so the raw text is threaded through here to
+        give the ad-hoc branch something real to answer.
+        """
         self._active_intake = None
 
         if decision.path == EntryPath.NEW_PROJECT_FROM_IDEA:
@@ -219,6 +318,14 @@ class Router:
             self.active_project = decision.project_name
             session = self.orchestrator.context_manager.get_session(decision.project_name)
             return self._describe_resumed_state(decision.project_name, session, decision.reason)
+
+        if decision.path == EntryPath.AD_HOC_QUESTION:
+            # The intake model can choose this independently of the rule-based
+            # classifier — ad_hoc_question is in its decidable set. Handling it
+            # only in _start_classification would have left this route quietly
+            # dead-ending on "not wired yet" for anyone whose phrasing happened
+            # to need a clarifying turn first.
+            return await self._handle_question(user_text)
 
         return RouterResult(
             kind="message",
@@ -445,6 +552,124 @@ class Router:
                 overall = "PASS" if passed else "FAIL"
                 lines.append(f"  [{role}] {display}: {overall} ({sum(gates.values())}/{len(gates)})")
         lines.append(result.get("message", ""))
+        return "\n".join(lines)
+
+    # ------------------------------------------------------------------
+    # Ad-hoc Q&A
+    # ------------------------------------------------------------------
+
+    async def _handle_question(self, question: str) -> RouterResult:
+        """
+        Answer a question without disturbing the workflow around it.
+
+        Nothing here touches Orchestrator or session stage. That's the whole
+        design: asking a question mid-review must be free, in the sense that
+        it cannot advance, rework, or fail the document under review. A user
+        who isn't certain that's true will avoid the feature at exactly the
+        moment it would help them most.
+        """
+        if not question:
+            return RouterResult(
+                kind="message",
+                message=(
+                    "Add a question after /ask — for example '/ask what does ARPU mean?' "
+                    "or '/ask what does the BRD say about churn?'."
+                ),
+                active_project=self.active_project,
+            )
+
+        result = await self.chat_skill.answer(
+            question=question,
+            project_context=self._project_context_for_chat(),
+            history=self._chat_history,
+        )
+
+        if result.get("status") != "success":
+            return RouterResult(
+                kind="error",
+                message=result.get("error", "Could not answer that."),
+                active_project=self.active_project,
+            )
+
+        answer_markdown = result["markdown"]
+
+        self._chat_history.append({"question": question, "answer": answer_markdown})
+        if len(self._chat_history) > _MAX_CHAT_HISTORY_TURNS:
+            del self._chat_history[:-_MAX_CHAT_HISTORY_TURNS]
+
+        message = answer_markdown
+
+        sources_footer = self._format_related_sources(result.get("related_sources", []))
+        if sources_footer:
+            message += f"\n\n{sources_footer}"
+
+        # Only nudge when something genuinely is outstanding. After a finished
+        # document there's no pending question, and inventing one would be
+        # noise rather than help.
+        if (self._active_intake is not None or self._pending_idea is not None) and self._last_pending_question:
+            message += f"\n\n(Still waiting on: {self._last_pending_question})"
+
+        return RouterResult(
+            kind="answer",
+            message=message,
+            data={"answer": answer_markdown, "related_sources": result.get("related_sources", [])},
+            active_project=self.active_project,
+        )
+
+    def _project_context_for_chat(self) -> Optional[Dict]:
+        """
+        Live project state for the answer, or None when nothing is open.
+
+        Reads straight from the session rather than from disk so an answer
+        reflects the document currently under review, including reworks that
+        haven't been re-approved yet — the version on screen is the version
+        the user is asking about.
+
+        RFC markdown is deliberately left out. Five more documents would
+        dominate the prompt for a question that is usually about one of them,
+        and 'export the security RFC' already covers reading them directly.
+        Worth revisiting if questions at the RFC gate turn out to be common.
+        """
+        if self.active_project is None:
+            return None
+
+        session = self.orchestrator.context_manager.get_session(self.active_project)
+        if not session:
+            return None
+
+        return {
+            "project_name": self.active_project,
+            "stage": session.get("stage"),
+            "problem_statement": session.get("problem_statement"),
+            "brd": (session.get("ba_output") or {}).get("markdown"),
+            "prd": (session.get("pe_output") or {}).get("markdown"),
+        }
+
+    def _format_related_sources(self, sources: List[Dict]) -> Optional[str]:
+        """
+        Render citations with their strength stated accurately.
+
+        The header wording is deliberate. These are whitelist matches on
+        topic keywords, not per-sentence verification — ResearchService does
+        not perform web search today. Labelling them "verified" would read as
+        a much stronger claim than the data supports, in a tool whose output
+        feeds real compliance documents. Naming the matched keyword lets the
+        reader judge the connection instead of taking it on trust.
+        """
+        if not sources:
+            return None
+
+        lines = ["Related authorized sources (matched on topic, not verified per claim):"]
+        for source in sources[:_MAX_SOURCES_SHOWN]:
+            queries = source.get("search_queries_used") or []
+            matched_on = f' — matched on "{queries[0]}"' if queries else ""
+            authority = source.get("authority_level", "unknown")
+            lines.append(f"  {source.get('source_url')} ({authority} authority){matched_on}")
+
+        remaining = len(sources) - _MAX_SOURCES_SHOWN
+        if remaining > 0:
+            lines.append(f"  (+{remaining} more)")
+
         return "\n".join(lines)
 
     # ------------------------------------------------------------------
