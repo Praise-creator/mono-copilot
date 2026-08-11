@@ -6,6 +6,29 @@ Used for source verification in BA/PE agents.
 from typing import Dict, List
 
 
+# The single sector-relevant regulator per country for GENERIC regulatory
+# claims ("regulation", "data residency", "government" with no specific
+# regulator abbreviation named). Every claim this system verifies is about
+# a telecom/MNO business, so an unscoped regulatory claim should cite the
+# telecom regulator specifically — not every government domain in
+# AUTHORIZED_SOURCES[country]["government"], which also includes agencies
+# with no telecom authority at all (tax, insurance, banking regulators).
+# Citing those for a customer-data-residency claim is a real-authority
+# mismatch: confirmed live that nrs.gov.ng (Nigeria Revenue Service, tax),
+# naicom.gov.ng (insurance), and cbn.gov.ng (central bank) are all real,
+# live sites for real agencies — just not ones with any say over telecom
+# customer data. They stay in AUTHORIZED_SOURCES below since they're
+# legitimate authorities for other kinds of claims a future project might
+# make; this map only controls what an UNSCOPED regulatory claim cites.
+TELECOM_REGULATOR: Dict[str, str] = {
+    "Nigeria": "ncc.gov.ng",
+    "Ghana": "nca.org.gh",
+    "Kenya": "ca.go.ke",
+    "South Africa": "icasa.org.za",
+    "Egypt": "tra.gov.eg",
+}
+
+
 # Authorized sources by country and type
 AUTHORIZED_SOURCES: Dict[str, Dict[str, List[str]]] = {
     "Nigeria": {
