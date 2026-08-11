@@ -17,7 +17,7 @@ class CopilotApp(App):
         new_message = Message(
                 role="Assistant", 
                 content="Welcome to Mono-Copilot.")
-        self.messages.append(new_message)
+        self.state_manager.add_message(role="Assistant", content="Welcome to Mono-Copilot.")
         self.messages = self.state_manager.state.messages.copy()
 
     def on_user_input_submitted(self, event: UserInputSubmitted):
