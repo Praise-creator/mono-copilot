@@ -18,8 +18,6 @@ Specific process per meeting notes:
 
 from typing import Optional, Dict, List
 from datetime import datetime
-import json
-from pathlib import Path
 import os
 import re
 from openai import AsyncOpenAI
@@ -94,7 +92,9 @@ QUALITY STANDARDS FOR LARGE-SCALE MNO:
 - All integrations MUST specify system names, protocols, and latencies
 - All exceptions MUST have detection method, impact, recovery, and support action
 - All business rules MUST be testable/enforceable
-- All regulatory references MUST be to real government sources (NCC, NCA, CMA, ICASA, NTRA)
+- All regulatory references MUST be to real government sources (NCC, NCA, CA, ICASA, TRA)
+- Match the regulator to the ACTUAL country named in the problem statement — a Ghana project cites NCA, not NCC. Do not default to NCC/Nigeria out of habit.
+- If NO country or market is stated in the problem statement, do NOT invent one. Write the regulatory section generically (e.g. "jurisdiction not specified — confirm target market before relying on this section") rather than picking a country and citing its regulator as if it were confirmed. Only cite a specific regulator when the country is explicitly given.
 - All market data MUST cite GSMA, Statista, or industry analysts
 
 BE SPECIFIC. BE MEASURABLE. BE IMPLEMENTABLE. BE VERIFIED."""
@@ -137,8 +137,12 @@ BE SPECIFIC. BE MEASURABLE. BE IMPLEMENTABLE. BE VERIFIED."""
             needs_mermaid = self._should_generate_mermaid(problem_statement, context, markdown)
             quality_gates = self._check_quality_gates(markdown, context, needs_mermaid)
             
-            sources_metadata = await self._extract_and_verify_sources(
-                markdown, segment, problem_statement
+            sources_metadata = await self.research_service.extract_and_verify_sources(
+                markdown=markdown,
+                segment=segment,
+                problem_statement=problem_statement,
+                id_key="brd_id",
+                id_prefix="BRD",
             )
             
             enhanced_markdown = self._add_verified_footnotes(markdown, sources_metadata)
@@ -148,13 +152,6 @@ BE SPECIFIC. BE MEASURABLE. BE IMPLEMENTABLE. BE VERIFIED."""
             else:
                 quality_gates["mermaid_diagrams"] = not needs_mermaid
 
-            Path("projects").mkdir(exist_ok=True)
-            brd_path = Path("projects") / "brd.md"
-            brd_path.write_text(enhanced_markdown)
-            
-            sources_path = Path("projects") / "sources.json"
-            sources_path.write_text(json.dumps(sources_metadata, indent=2, default=str))
-            
             mandatory_gates = [
                 quality_gates.get("process_flow_analysis", False),
                 quality_gates.get("integration_architecture", False),
@@ -174,7 +171,6 @@ BE SPECIFIC. BE MEASURABLE. BE IMPLEMENTABLE. BE VERIFIED."""
                 "approval_required": True,
                 "generated_at": datetime.now().isoformat(),
                 "run_count": run_count,
-                "file_path": str(brd_path),
                 "sources_verified_count": len(sources_metadata.get("sources_used", []))
             }
         
@@ -219,7 +215,7 @@ PROCESS FLOW PROBLEM:
         
         prompt += """
 INSTRUCTIONS:
-1. Use web search for regulatory requirements (NCC, NCA, CMA, ICASA, NTRA)
+1. Use web search for regulatory requirements (NCC, NCA, CA, ICASA, TRA)
 2. Use web search for market data (GSMA Intelligence, Statista)
 3. Generate comprehensive BRD with:
    - Current & proposed process flows (with quantified bottlenecks)
@@ -309,56 +305,6 @@ INSTRUCTIONS:
             "business_rules": rules,
             "mermaid_diagrams": mermaid
         }
-    
-    async def _extract_and_verify_sources(
-        self,
-        markdown: str,
-        segment: str,
-        problem_statement: str
-    ) -> Dict:
-        sources_used = []
-        
-        regulatory_keywords = ["ncc", "nca", "cma", "icasa", "ntra", "compliance", "regulation", "requirement"]
-        market_keywords = ["gsma", "statista", "gartner", "market", "arpu", "churn", "coverage"]
-        
-        text_lower = markdown.lower()
-        problem_lower = problem_statement.lower()
-        
-        for keyword in regulatory_keywords + market_keywords:
-            if keyword in text_lower or keyword in problem_lower:
-                search_result = await self.research_service.search_and_verify(keyword, segment)
-                if search_result.get("verified_sources"):
-                    for source in search_result["verified_sources"]:
-                        sources_used.append(source)
-        
-        sentences = re.split(r'(?<=[.!?])\s+', markdown)
-        for sentence in sentences[:10]:
-            if any(kw in sentence.lower() for kw in regulatory_keywords + market_keywords):
-                search_result = await self.research_service.search_and_verify(sentence, segment)
-                if search_result.get("verified_sources"):
-                    for source in search_result["verified_sources"]:
-                        if source not in sources_used:
-                            sources_used.append(source)
-        
-        sources_metadata = {
-            "brd_id": f"BRD-{datetime.now().strftime('%Y%m%d')}",
-            "project_name": segment,
-            "generated_at": datetime.now().isoformat(),
-            "sources_used": sources_used,
-            "search_statistics": {
-                "total_searches": len(regulatory_keywords + market_keywords),
-                "sources_verified": len(sources_used),
-                "verification_coverage": "high" if len(sources_used) >= 2 else "medium" if len(sources_used) == 1 else "low"
-            },
-            "data_integrity": {
-                "all_sources_verified": len(sources_used) >= 2,
-                "hallucination_risk": "low" if len(sources_used) >= 2 else "medium" if len(sources_used) == 1 else "high",
-                "unresolved_conflicts": 0,
-                "manual_review_recommended": len(sources_used) == 0
-            }
-        }
-        
-        return sources_metadata
     
     def _add_verified_footnotes(self, markdown: str, sources_metadata: Dict) -> str:
         sources = sources_metadata.get("sources_used", [])

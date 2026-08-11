@@ -259,7 +259,7 @@ async def startup_event():
     """Initialize on startup."""
     from pathlib import Path
     Path("projects").mkdir(exist_ok=True)
-    print("✅ Mono-Copilot started")
+    print("Mono-Copilot started")
 
 
 def run() -> None:

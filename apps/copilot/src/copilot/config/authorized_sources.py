@@ -11,15 +11,13 @@ AUTHORIZED_SOURCES: Dict[str, Dict[str, List[str]]] = {
     "Nigeria": {
         "government": [
             "ncc.gov.ng",
-            "firs.gov.ng",
+            "nrs.gov.ng",
             "naicom.gov.ng",
             "cbn.gov.ng",
-            "naira.gov.ng",
         ],
         "industry": [
             "gsma.com",
             "statista.com",
-            "idcafrica.com",
         ],
         "academic": [
             "unilag.edu.ng",
@@ -30,7 +28,7 @@ AUTHORIZED_SOURCES: Dict[str, Dict[str, List[str]]] = {
         "government": [
             "nca.org.gh",
             "mofep.gov.gh",
-            "bog.org.gh",
+            "bog.gov.gh",
         ],
         "industry": [
             "gsma.com",
@@ -40,9 +38,9 @@ AUTHORIZED_SOURCES: Dict[str, Dict[str, List[str]]] = {
     },
     "Kenya": {
         "government": [
+            "ca.go.ke",
             "cma.or.ke",
-            "ica.go.ke",
-            "cbr.go.ke",
+            "centralbank.go.ke",
         ],
         "industry": [
             "gsma.com",
@@ -64,8 +62,8 @@ AUTHORIZED_SOURCES: Dict[str, Dict[str, List[str]]] = {
     },
     "Egypt": {
         "government": [
-            "ntra.gov.eg",
-            "egbank.org.eg",
+            "tra.gov.eg",
+            "cbe.org.eg",
         ],
         "industry": [
             "gsma.com",
@@ -79,7 +77,6 @@ AUTHORIZED_SOURCES: Dict[str, Dict[str, List[str]]] = {
             "statista.com",
             "gartner.com",
             "forrester.com",
-            "idcafrica.com",
         ],
         "academic": [
             "ieee.org",
@@ -100,8 +97,13 @@ def is_source_authorized(source_url: str) -> bool:
     Returns:
         True if authorized, False otherwise
     """
-    # TODO: Implement whitelist checking logic
-    pass
+    url_lower = source_url.lower()
+    for sources_by_type in AUTHORIZED_SOURCES.values():
+        for urls in sources_by_type.values():
+            for authorized_url in urls:
+                if authorized_url.lower() in url_lower:
+                    return True
+    return False
 
 
 def get_authority_level(source_url: str) -> str:
@@ -114,5 +116,10 @@ def get_authority_level(source_url: str) -> str:
     Returns:
         Authority level: "high", "medium", or "low"
     """
-    # TODO: Implement authority level detection
-    pass
+    url_lower = source_url.lower()
+    for sources_by_type in AUTHORIZED_SOURCES.values():
+        for source_type, urls in sources_by_type.items():
+            for authorized_url in urls:
+                if authorized_url.lower() in url_lower:
+                    return "high" if source_type in ("government", "industry", "academic") else "low"
+    return "low"
