@@ -12,10 +12,12 @@ dependencies = [
     "weasyprint>=62.0",
     "markdown>=3.6",
     "runtime",
+    "textual>=0.22.0",
 ]
 
 [project.scripts]
 start = "copilot.main:run"
+mono = "copilot.cli.__main__:main"
 
 [tool.uv.sources]
 runtime = { workspace = true }
