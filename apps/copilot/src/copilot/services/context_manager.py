@@ -1,5 +1,5 @@
-from typing import Dict, Optional
 from datetime import datetime
+from typing import Optional
 
 from .session_store import SessionStore
 
@@ -20,7 +20,7 @@ class ContextManager:
     """
 
     def __init__(self):
-        self.sessions: Dict[str, dict] = {}
+        self.sessions: dict[str, dict] = {}
         self.session_store = SessionStore()
 
     def init_session(
