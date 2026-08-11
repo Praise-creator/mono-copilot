@@ -1,0 +1,15 @@
+MainArea {
+    height: 1fr;
+}
+
+ChatPane{
+    height: 1fr
+}
+
+ComposeArea {
+    height: 3;
+}
+
+CopilotStatusBar {
+    height: 1;
+}
