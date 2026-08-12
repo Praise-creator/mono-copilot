@@ -131,7 +131,7 @@ def render_mermaid_blocks(markdown_text: str, work_dir: Path) -> str:
 _PDF_CSS = """
 @page { size: A4; margin: 2cm; @bottom-center { content: counter(page) " / " counter(pages); font-size: 9px; color: #888; } }
 body { font-family: Georgia, 'Times New Roman', serif; line-height: 1.5; color: #1a1a1a; font-size: 11px; }
-h1, h2, h3 { font-family: Helvetica, Arial, sans-serif; color: #0d1b2a; }
+h1, h2, h3 { font-family: Helvetica, Arial, sans-serif; color: #0d1b2a; break-after: avoid; page-break-after: avoid; }
 h1 { border-bottom: 2px solid #0d1b2a; padding-bottom: 6px; font-size: 20px; }
 h2 { border-bottom: 1px solid #ccc; padding-bottom: 4px; margin-top: 24px; font-size: 15px; }
 h3 { font-size: 12px; margin-top: 16px; }
@@ -140,7 +140,7 @@ pre { padding: 8px; border-radius: 4px; overflow-x: auto; font-size: 9px; white-
 table { border-collapse: collapse; width: 100%; margin: 10px 0; font-size: 10px; }
 th, td { border: 1px solid #ccc; padding: 5px 8px; text-align: left; }
 th { background: #f0f0f0; }
-.mermaid-diagram { max-width: 100%; margin: 14px 0; display: block; }
+.mermaid-diagram { max-width: 100%; max-height: 21cm; margin: 14px 0; display: block; break-inside: avoid; page-break-inside: avoid; }
 a { color: #0d1b2a; }
 """
 
