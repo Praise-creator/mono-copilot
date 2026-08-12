@@ -20,6 +20,44 @@ import re
 from openai import AsyncOpenAI
 
 from ..services.research_service import ResearchService
+from ..services.mermaid_validation import validate_mermaid_diagrams, sanitize_mermaid_diagrams
+from ..services.diagram_consistency_service import run_full_diagram_review
+
+
+# Signal words indicating the PRD's own described architecture actually
+# includes a predictive/ML component -- gates the ML Methodology section
+# below so it only fires when relevant. This is the same shape of decision
+# rfc_skill.py's MERMAID_REQUIRED conditionals already make ("only if the
+# threat model spans several trust boundaries") rather than a new pattern:
+# a marketing-campaign or network-ops PRD with no ML component should never
+# see a section asking about class imbalance or model retraining cadence --
+# forcing it in unconditionally would be exactly the kind of one-project
+# overfit this codebase's own SRS-genericity discipline already warns
+# against.
+_ML_SIGNAL_KEYWORDS = (
+    "predictive analytic", "machine learning", "ml model", "classifier",
+    "classification model", "prediction engine", "scoring model",
+    "risk score", "recommendation engine", "ai-driven", "artificial intelligence",
+    "neural network", "regression model",
+)
+
+
+def _mentions_ml_component(text: str) -> bool:
+    text_lower = text.lower()
+    return any(re.search(r"\b" + re.escape(kw) + r"s?\b", text_lower) for kw in _ML_SIGNAL_KEYWORDS)
+
+
+_ML_METHODOLOGY_INSTRUCTION = """
+ML METHODOLOGY & MODEL GOVERNANCE (required -- the BRD/problem statement describes a predictive/ML component):
+This PRD's whole premise involves a model making a real decision, so the model itself needs the same rigor as everything else here -- not an architecture box with no substance behind it. Cover, concretely:
+- Model framing: binary classification vs. survival/time-to-event analysis, stated with a reason, not just named.
+- Feature categories: name real categories (behavioral/RFM signals, usage-trend deltas, support-contact frequency, tenure, etc.), not just "historical data."
+- Class imbalance handling: state the actual technique (class weighting, resampling, precision/recall-focused evaluation) -- rare-event prediction always needs one, name it.
+- Explainability: state the per-prediction explanation approach (e.g. SHAP or equivalent). This is the first thing a legal/compliance reviewer asks about when a model's output determines who gets a financial incentive and who doesn't.
+- Validation approach: temporal holdout, not a random split -- state this explicitly, since a random split leaks future information into training for this kind of time-ordered prediction problem.
+- Retraining cadence and drift monitoring: a concrete trigger condition, not "periodically."
+- Human-in-the-loop threshold: state the score band (if any) where a human reviews before action is taken automatically.
+"""
 
 
 class PESkill:
@@ -56,11 +94,13 @@ Break the requirements into real technical components. Not "an AI recommendation
 How do the pieces talk to each other?
 Every integration between systems is a potential failure point. Document each one: which system calls which, what protocol, what payload, what the latency SLA is, and what happens when it fails. "The CRM is unavailable" is not an edge case at MNO scale, it is a Tuesday. Model the failure explicitly — detection method, what the user sees, what the system does, when ops gets paged.
 
-DRAW THE DIAGRAMS NOW. Do not say "a diagram will be provided." Do not say "see attached." Write the actual Mermaid code blocks inline, right here, in this document. Every PRD at this scale needs at minimum:
-- A system architecture diagram showing all components and their connections
-- A monitoring/observability diagram showing metrics flow through to alerting
+DRAW THE DIAGRAMS NOW. Do not say "a diagram will be provided." Do not say "see attached." Write the actual Mermaid code blocks inline, right here, in this document. Every PRD at this scale needs EXACTLY two diagrams, no more:
+- ONE system architecture diagram showing all components and their connections -- this is the FIRST technical, system-level diagram in the whole pipeline. The BRD you were handed draws only a business-process/customer-journey diagram with business actors (Subscriber, CSR, Care Team) -- introducing real internal component names (a CDP, an analytics engine, whatever the actual backend systems are) for the first time is your job here, not a restatement of anything already drawn. A real problem already happened from treating "integration map" as a second diagram: it produced two nearly-identical Mermaid blocks in the same PRD, one styled with colors and one plain, both showing the same architecture. "Integration map" is a section of TEXT (protocol, latency SLA, failure handling per connection, in prose or a table) sitting next to the ONE diagram, not a second diagram.
+- ONE monitoring/observability diagram showing metrics flow through to alerting.
 
 Use ```mermaid blocks. Use real component names. Show actual data flows with arrows.
+
+Syntax care matters here specifically, since an inconsistent arrow breaks the whole diagram's rendering, not just one edge: an arrow with a label is written `A -->|label| B` (solid arrowhead, label in pipes) — never drop the arrowhead partway through a diagram (`A --|label| B` is invalid and will fail to render, even if earlier lines in the same diagram used the correct form). If a label contains parentheses, wrap the whole node label in quotes, e.g. CRM["CRM System (Extended)"] — an unquoted parenthesis inside a bracketed label is a common cause of the whole diagram failing to render.
 
 What are the non-negotiable technical properties?
 State exact numbers. Not "highly available" — "99.95% uptime, RTO 5 minutes, RPO zero for customer financial records." Not "fast" — "< 200ms p95 for the recommendation API under 1000 concurrent sessions." Every number must trace to a source or be marked with its confidence level: CONFIDENCE: HIGH (verified source), CONFIDENCE: MEDIUM (industry norm), CONFIDENCE: LOW (assumption).
@@ -137,7 +177,25 @@ Do not invent data. If you do not know, say so and mark it LOW confidence."""
                     "quality_gates_passed": False
                 }
 
+            # Deterministic punctuation-level cleanup -- see mermaid_validation.py
+            # and ba_skill.py's identical wiring for why this runs before gates.
+            markdown = sanitize_mermaid_diagrams(markdown)
+
+            # Structural (Layer 1) + prose-consistency (Layer 2) diagram review --
+            # see diagram_consistency_service.py and ba_skill.py's identical wiring.
+            # This is exactly the layer that catches the real bug ba_skill.py's own
+            # sanitizer can't: a PRD diagram merging "REST API" and "SMPP" into one
+            # shared edge label when the prose two lines up says they're different.
+            # Also passes the BRD as Layer 3's comparison target -- a real run
+            # showed PE's own system architecture diagram come out as a
+            # character-for-character copy of BA's diagram, since the BRD (with
+            # its diagram already drawn) sits right there in PE's own input and
+            # nothing was checking whether PE's diagram was actually new.
+            diagram_review = await run_full_diagram_review(markdown, compare_against_markdown=brd_markdown)
+
             quality_gates = self._check_quality_gates(markdown)
+            # Informational, not mandatory -- same treatment as mermaid_diagrams below.
+            quality_gates["diagram_review_ok"] = diagram_review["overall_ok"]
 
             sources_metadata = await self.research_service.extract_and_verify_sources(
                 markdown=markdown,
@@ -166,6 +224,7 @@ Do not invent data. If you do not know, say so and mark it LOW confidence."""
                 "markdown": enhanced_markdown,
                 "structured": self._parse_sections(markdown),
                 "sources_metadata": sources_metadata,
+                "diagram_review": diagram_review,
                 "quality_gates": quality_gates,
                 "quality_gates_passed": gates_passed,
                 "approval_required": True,
@@ -205,9 +264,9 @@ Important: draw the Mermaid diagrams inline in this document — do not referenc
 
 Include at minimum:
 - Component breakdown (what is built, bought, extended)
-- Integration map: for each system connection, name the protocol, latency SLA, and exact failure handling
-- Mermaid system architecture diagram (draw it now)
-- Mermaid observability diagram (draw it now)
+- Integration map, as TEXT (not a second diagram): for each system connection, name the protocol, latency SLA, and exact failure handling
+- ONE Mermaid system architecture diagram (draw it now) -- the pipeline's first technical diagram, introducing real component names for the first time
+- ONE Mermaid observability diagram (draw it now)
 - Failure scenarios: for each critical dependency, state detection method, user impact, system recovery action, and escalation path
 - NFRs with exact numbers: uptime percentage, RTO, RPO, p95 latency, max concurrent users
 - Data residency: where data lives, how that is enforced technically per NCC or relevant regulator
@@ -218,6 +277,9 @@ Include at minimum:
 
         if feedback and run_count > 1:
             prompt += f"\nREFINEMENT FEEDBACK (Attempt {run_count}):\n{feedback}\n"
+
+        if _mentions_ml_component(brd_markdown + " " + problem_statement):
+            prompt += _ML_METHODOLOGY_INSTRUCTION
 
         return prompt
 
@@ -274,17 +336,10 @@ Include at minimum:
         }
 
     def _validate_mermaid(self, markdown: str) -> bool:
-        """Validate mermaid blocks have real content, not placeholders."""
-        blocks = re.findall(r'```mermaid\n(.*?)\n```', markdown, re.DOTALL)
-        if not blocks:
-            return False
-        for block in blocks:
-            lines = [l for l in block.strip().split('\n') if l.strip()]
-            if len(lines) < 4:
-                return False
-            if not any(sym in block for sym in ['->', '-->', '|']):
-                return False
-        return True
+        """Validate mermaid blocks have real content and no known-bad syntax
+        pattern -- shared logic, see mermaid_validation.py for why this used
+        to be three separate weaker copies."""
+        return validate_mermaid_diagrams(markdown)
 
     def _add_verified_footnotes(self, markdown: str, sources_metadata: Dict) -> str:
         """Add source footnotes. Mirrors ba_skill exactly."""

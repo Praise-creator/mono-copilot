@@ -49,15 +49,15 @@ USER_ID = "kb-rfc-test"
 
 def _prompt_for_project_input() -> tuple:
     """Gather a real problem statement, segment, and project name at
-    runtime — no hardcoded scenario. This is the actual live-use path:
+    runtime -- no hardcoded scenario. This is the actual live-use path:
     whatever you type here is exactly what the BA agent sees, same as a
     real user would type into the eventual chat interface."""
     print("Describe the business problem or idea you want to explore.")
-    print("(Multi-line is fine — type END on its own line when done.)\n")
+    print("(Multi-line is fine — press Enter on an empty line when done.)\n")
     lines = []
     while True:
         line = input()
-        if line.strip().upper() == "END":
+        if line.strip() == "" and lines:
             break
         lines.append(line)
     problem_statement = "\n".join(lines).strip()
