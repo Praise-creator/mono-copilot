@@ -1,5 +1,9 @@
 import argparse
+
 from copilot.cli import commands
+from copilot.orchestrator import Orchestrator
+from copilot.tui.app import CopilotApp
+from copilot.tui.state import Message
 
 
 def parse_args():
@@ -22,7 +26,8 @@ def parse_args():
     feedback.add_argument("--project", required=True)
     feedback.add_argument("--stage", required=True, choices=["ba", "pe", "rfc"])
     feedback.add_argument("--message", required=True)
-    sub.add_parser("chat")
+    chat = sub.add_parser("chat")
+    chat.add_argument("--project", required=False, help="Open this project in the TUI")
     return p.parse_args()
 
 
@@ -59,7 +64,29 @@ def main():
         return
 
     if args.cmd == "chat":
-        print("TUI not implemented yet.")
+        
+
+        app = CopilotApp()
+
+        project = getattr(args, "project", None)
+        if project:
+            orch = Orchestrator()
+            session = orch.context_manager.get_session(project)
+            app.state_manager.state.active_project = project
+            if session:
+                app.state_manager.state.workflow_stage = session.get("stage")
+                brd = (session.get("ba_output") or {}).get("markdown")
+                prd = (session.get("pe_output") or {}).get("markdown")
+                app.state_manager.state.current_document = brd or prd
+                app.state_manager.add_message(
+                    Message(role="Assistant", content=f"Resumed project '{project}' (stage: {session.get('stage')}).")
+                )
+            else:
+                app.state_manager.add_message(
+                    Message(role="Assistant", content=f"Opened project '{project}' — no persisted session found.")
+                )
+
+        app.run()
         return
 
     print("Unknown command")
