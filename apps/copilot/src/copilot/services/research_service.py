@@ -16,7 +16,7 @@ import os
 import re
 from typing import Optional, List, Dict, Tuple
 from datetime import datetime
-from ..config.authorized_sources import AUTHORIZED_SOURCES
+from ..config.authorized_sources import AUTHORIZED_SOURCES, TELECOM_REGULATOR
 
 
 # Country-agnostic keywords: match anywhere, filtered to whichever country's
@@ -25,11 +25,19 @@ _GENERIC_REGULATORY_KEYWORDS = ["data residency", "regulation", "regulatory", "g
 
 # Regulator abbreviation -> country. Already unambiguous per-keyword (each
 # abbreviation belongs to exactly one country), so these don't need country
-# filtering the way the generic keywords above do.
+# filtering the way the generic keywords above do. Kenya deliberately has
+# no entry here: its old "cma" mapping was wrong (Kenya's Capital Markets
+# Authority, a securities regulator — confirmed live, no telecom
+# authority), and the correct short form "ca" (Communications Authority of
+# Kenya) is too risky to bare-word-match — this same RFC pipeline's own
+# Security prompt generates content about TLS/PKI "Certificate
+# Authorities," which would very plausibly use the standalone token "CA"
+# for something with nothing to do with Kenya's regulator. Kenya's
+# citations flow through _detect_country() naming "Kenya" directly plus
+# TELECOM_REGULATOR below instead — safer than a 2-letter abbreviation.
 _REGULATOR_ABBREVIATION_TO_COUNTRY = {
     "ncc": "Nigeria",
     "nca": "Ghana",
-    "cma": "Kenya",
     "icasa": "South Africa",
     "ntra": "Egypt",
 }
@@ -175,7 +183,10 @@ class ResearchService:
         return self._detect_country(text)
 
     def _all_government_sources(self) -> List[Tuple[str, str]]:
-        """[(country, full_url), ...] across every country, excluding Global."""
+        """[(country, full_url), ...] across every country, excluding Global.
+        Kept for callers that genuinely want every government domain for a
+        country (e.g. inspection/debugging); search_and_verify() below no
+        longer uses this for regulatory-claim citation — see TELECOM_REGULATOR."""
         result = []
         for country, sources_by_type in self.authorized_sources.items():
             if country == "Global":
@@ -251,22 +262,31 @@ class ResearchService:
 
         if any(_contains_keyword(claim_lower, kw) for kw in _GENERIC_REGULATORY_KEYWORDS):
             if resolved_country:
-                government_sources = [(c, u) for c, u in self._all_government_sources() if c == resolved_country]
-                confidence = "high"
-                for _, url in government_sources:
-                    entry = self._make_source_entry(claim, url, confidence, "data residency")
+                # Only the actual telecom regulator, not every government
+                # domain the country has — AUTHORIZED_SOURCES also lists
+                # agencies (tax, insurance, banking) with real, live sites
+                # but zero authority over telecom customer data. Citing them
+                # for a data-residency claim is a real-authority mismatch,
+                # not evidence. Confirmed live for Nigeria (nrs.gov.ng,
+                # naicom.gov.ng, cbn.gov.ng are all real agencies, none of
+                # them telecom regulators).
+                regulator_domain = TELECOM_REGULATOR.get(resolved_country)
+                if regulator_domain:
+                    entry = self._make_source_entry(claim, f"https://{regulator_domain}", "high", "data residency")
                     if entry:
                         verified_sources.append(entry)
                 search_attempts += 1
             elif not suppress_unscoped_government:
                 # Genuinely ambiguous — no country known anywhere in context.
-                # Return all as before, but mark it medium rather than high
-                # since citing every country's regulator for an unscoped
-                # claim is weaker evidence than citing the one that matters.
-                government_sources = self._all_government_sources()
+                # Cite every country's TELECOM regulator specifically, not
+                # every government domain in every country — same reasoning
+                # as the resolved-country branch above, just unscoped across
+                # all 5. Medium rather than high confidence since naming the
+                # one country that actually matters is stronger evidence
+                # than naming all five's regulators at once.
                 confidence = "medium"
-                for _, url in government_sources:
-                    entry = self._make_source_entry(claim, url, confidence, "data residency")
+                for country_name, regulator_domain in TELECOM_REGULATOR.items():
+                    entry = self._make_source_entry(claim, f"https://{regulator_domain}", confidence, "data residency")
                     if entry:
                         verified_sources.append(entry)
                 search_attempts += 1
@@ -276,8 +296,16 @@ class ResearchService:
 
         for abbreviation, country_name in _REGULATOR_ABBREVIATION_TO_COUNTRY.items():
             if _contains_keyword(claim_lower, abbreviation):
-                for url in self.authorized_sources.get(country_name, {}).get("government", []):
-                    entry = self._make_source_entry(claim, f"https://{url}", "high", abbreviation)
+                # Same bug, same fix as the generic-keyword branch above:
+                # cite only the specific regulator this abbreviation names,
+                # not every government domain in that country. This was
+                # still citing nrs.gov.ng/naicom.gov.ng/cbn.gov.ng whenever
+                # a document said "NCC" by name, even after the generic-
+                # keyword path was fixed — confirmed on a real run, not
+                # theoretical.
+                regulator_domain = TELECOM_REGULATOR.get(country_name)
+                if regulator_domain:
+                    entry = self._make_source_entry(claim, f"https://{regulator_domain}", "high", abbreviation)
                     if entry:
                         verified_sources.append(entry)
                 search_attempts += 1
