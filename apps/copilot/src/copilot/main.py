@@ -173,7 +173,6 @@ async def get_brd(project_name: str):
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-
 @app.get("/projects/{project_name}/prd")
 async def get_prd(project_name: str):
     """Get PRD for a project."""
