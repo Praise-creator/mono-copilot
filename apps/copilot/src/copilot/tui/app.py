@@ -1,10 +1,7 @@
 from copilot.tui.state_manager import StateManager
 from copilot.tui.widgets.chat_pane import ChatPane
 from textual.app import App
-from copilot.tui.widgets.header import CopilotHeader
 from copilot.tui.widgets.main_area import MainArea
-from copilot.tui.widgets.compose_area import ComposeArea
-from copilot.tui.widgets.status_bar import CopilotStatusBar
 from copilot.tui.state import Message
 from copilot.tui.widgets.widget_comm import StateUpdated, UserInputSubmitted
 
@@ -26,7 +23,4 @@ class CopilotApp(App):
 )
 
     def compose(self):
-        yield CopilotHeader()
         yield MainArea(self.state_manager)
-        yield ComposeArea()
-        yield CopilotStatusBar()

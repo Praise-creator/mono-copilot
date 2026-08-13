@@ -1,10 +1,14 @@
-from textual.containers import Container;
-from copilot.tui.widgets.chat_pane import ChatPane 
+from textual.containers import Horizontal
 
-class MainArea(Container):
+from copilot.tui.widgets.workspace import Workspace
+import copilot.tui.widgets.sidebar 
+
+
+class MainArea(Horizontal):
     def __init__(self, state_manager):
         super().__init__()
-        self.state_manager = state_manager
+        self.state_manager = state_manager 
 
     def compose(self):
-            yield ChatPane(self.state_manager.state)
+        yield copilot.tui.widgets.sidebar.Sidebar()
+        yield Workspace(self.state_manager)

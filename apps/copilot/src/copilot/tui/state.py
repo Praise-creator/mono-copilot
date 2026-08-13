@@ -10,6 +10,6 @@ class CopilotState:
     messages: list[Message] = field(default_factory=list)
     active_project: str | None = None
     workflow_stage: str | None = None
-    run_conunt: int = 0
+    run_count: int = 0
     loading: bool = False
     current_document: str | None = None
