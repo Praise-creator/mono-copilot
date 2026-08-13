@@ -309,7 +309,15 @@ of habit when no country was stated.
                 url = source.get("source_url")
                 if url and url not in seen_urls:
                     seen_urls.add(url)
-                    collected.append(source)
+                    # "claim" is dropped on the way out. ResearchService sets
+                    # it to whatever text was searched, which here is the whole
+                    # question or the whole answer rather than a single
+                    # sentence. Nothing renders it, and on the answer pass it
+                    # can be several kilobytes riding along in
+                    # RouterResult.data for no reason. The keyword that
+                    # actually surfaced the source is already in
+                    # search_queries_used, which is what the footer shows.
+                    collected.append({k: v for k, v in source.items() if k != "claim"})
 
         return collected
 

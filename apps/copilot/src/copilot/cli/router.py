@@ -50,7 +50,7 @@ from .approval_words import is_approval
 from .line_reference import resolve_line_reference
 from ..orchestrator import Orchestrator
 from ..skills.rfc_skill import RFC_ROLES, ROLE_DISPLAY_NAMES, ROLE_ALIASES
-from ..skills.chat_skill import ChatSkill
+from ..skills.chat_skill import ChatSkill, MAX_HISTORY_TURNS
 from ..services.pdf_export import export_document
 
 
@@ -70,11 +70,6 @@ _EXPORT_REQUEST_STARTERS = (
 _MAX_BARE_EXPORT_WORDS = 3
 
 _ASK_COMMAND = "/ask"
-
-# Q&A turns retained per session. ChatSkill enforces its own ceiling on what
-# it actually sends; this one bounds what Router holds in memory, so a long
-# session can't grow an unbounded transcript.
-_MAX_CHAT_HISTORY_TURNS = 6
 
 # Enough citations to be useful in a terminal footer without burying the
 # answer they belong to.
@@ -606,9 +601,15 @@ class Router:
 
         answer_markdown = result["markdown"]
 
+        # Trimmed to the same cap ChatSkill sends, imported rather than
+        # redeclared. Two constants that have to agree is how the "finish"
+        # approval-word bug happened, and approval_words.py exists as a single
+        # source of truth for exactly that reason. Holding more turns than are
+        # ever sent would be dead weight; holding fewer would silently shorten
+        # the context the model gets, with nothing to catch the mismatch.
         self._chat_history.append({"question": question, "answer": answer_markdown})
-        if len(self._chat_history) > _MAX_CHAT_HISTORY_TURNS:
-            del self._chat_history[:-_MAX_CHAT_HISTORY_TURNS]
+        if len(self._chat_history) > MAX_HISTORY_TURNS:
+            del self._chat_history[:-MAX_HISTORY_TURNS]
 
         message = answer_markdown
 

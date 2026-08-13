@@ -28,7 +28,7 @@ bootstrap()
 
 from copilot.cli.router import Router, _parse_ask_command
 from copilot.orchestrator import Orchestrator
-from copilot.skills.chat_skill import ChatSkill
+from copilot.skills.chat_skill import ChatSkill, MAX_HISTORY_TURNS
 
 check = Checks()
 
@@ -73,6 +73,13 @@ async def main():
     check("whitelist matched the topic", len(result["related_sources"]) > 0)
     urls = {s["source_url"] for s in result["related_sources"]}
     check("sources deduplicated by url", len(urls) == len(result["related_sources"]))
+    # ResearchService sets "claim" to the entire searched text, which nothing
+    # renders and which is kilobytes wide on the answer pass.
+    check("searched text not carried along in every source",
+          all("claim" not in s for s in result["related_sources"]))
+    check("what the footer renders is still present",
+          all({"source_url", "authority_level", "search_queries_used"} <= set(s)
+              for s in result["related_sources"]))
 
     check.section("[3] a failed model call never raises")
     with patch.object(skill.client.chat.completions, "create",
@@ -166,7 +173,10 @@ async def main():
     with patch.object(router.chat_skill.client.chat.completions, "create",
                       new=AsyncMock(return_value=fake_completion("x"))):
         await router.handle_input("/ask one more")
-    check("trimmed to the cap", len(router._chat_history) == 6, str(len(router._chat_history)))
+    # Compared against the imported cap rather than a literal, so what Router
+    # keeps and what ChatSkill sends cannot drift apart unnoticed.
+    check("trimmed to the shared cap", len(router._chat_history) == MAX_HISTORY_TURNS,
+          str(len(router._chat_history)))
     check("most recent turn kept", router._chat_history[-1]["question"] == "one more")
 
 
