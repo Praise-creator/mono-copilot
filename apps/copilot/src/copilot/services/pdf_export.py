@@ -102,15 +102,24 @@ def _explain_mmdc_failure(exc: Exception) -> str:
     if not lines:
         return type(exc).__name__
 
-    for marker in ("Error:", "error:", "ERR_", "Cannot find", "Could not find", "not found"):
-        for line in lines:
-            if marker in line:
+    # npm's own chatter is never the answer, so it is dropped before looking.
+    def _is_npm_noise(line: str) -> bool:
+        lowered = line.lower()
+        return lowered.startswith("npm notice") or lowered.startswith("npm warn")
+
+    candidates = [line for line in lines if not _is_npm_noise(line)]
+
+    # "error" is matched anywhere in the line rather than as "Error:", because
+    # mermaid reports a bad diagram as "Parse error on line 3:", which has no
+    # colon after the word and would otherwise be missed. That case matters:
+    # a diagram this tool generated being unparseable is a different problem
+    # from a broken toolchain, and the whole point is telling them apart.
+    for pattern in ("error", "cannot find", "could not find", "not found", "err_"):
+        for line in candidates:
+            if pattern in line.lower():
                 return line
 
-    # Nothing recognisable, so fall back to the last line that is not an npm
-    # notice, and only then to the last line at all.
-    meaningful = [line for line in lines if not line.lower().startswith("npm notice")]
-    return (meaningful or lines)[-1]
+    return (candidates or lines)[-1]
 
 
 def render_mermaid_blocks(markdown_text: str, work_dir: Path) -> str:
