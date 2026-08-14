@@ -81,9 +81,28 @@ a clear message telling you this section is what to read.
 
 ```bash
 brew install pango
-echo 'export DYLD_FALLBACK_LIBRARY_PATH="/opt/homebrew/lib:$DYLD_FALLBACK_LIBRARY_PATH"' >> ~/.zshrc
+```
+
+Then check whether that is already enough:
+
+```bash
+uv run --package copilot python3 -c "import weasyprint; print('weasyprint OK')"
+```
+
+If it prints `weasyprint OK`, you are done. On Intel Macs it usually does,
+because Homebrew installs to `/usr/local/lib`, which macOS already searches.
+
+If it fails with a "cannot load library" error, which is common on Apple
+Silicon since `/opt/homebrew/lib` is not searched by default, point
+WeasyPrint at Homebrew's libraries:
+
+```bash
+echo 'export DYLD_FALLBACK_LIBRARY_PATH="$(brew --prefix)/lib:$DYLD_FALLBACK_LIBRARY_PATH"' >> ~/.zshrc
 source ~/.zshrc
 ```
+
+`$(brew --prefix)` is used rather than a hardcoded path so this works on both
+Apple Silicon (`/opt/homebrew`) and Intel (`/usr/local`).
 
 Open a **new** terminal window afterward -- `source`ing in the same window
 you ran the `echo` in is not enough on its own if you already have a shell
@@ -142,19 +161,38 @@ To resume a specific project directly without being asked for its name:
 uv run --package copilot python3 -m copilot.cli chat --project my-project-name
 ```
 
-**Use `python3 -m copilot.cli chat`, not `mono chat`, even though both exist
-and `mono` is shorter.** There's also a `mono` console script that does the
-same thing (`uv run --package copilot mono chat`) -- it works for everyday
-use, but on macOS specifically, exporting a PDF from inside it can fail with
-a confusing "cannot load library" error even after the WeasyPrint setup
-above, because the `mono` script is a small shell wrapper, and macOS strips
-WeasyPrint's required environment variable from processes launched that way
-before Python ever sees it. Running the module directly, as shown above,
-never hits this. Same app either way, this is purely about which one
-reliably supports PDF export on macOS.
+There is also a shorter `mono` command that runs the same app:
+
+```bash
+uv run --package copilot mono chat
+```
+
+**If PDF export fails from `mono chat`, use `python3 -m copilot.cli chat`
+instead.** On some macOS setups, exporting from the `mono` command has failed
+with a "cannot load library" error even after the WeasyPrint setup above,
+while running the module directly worked. It does not happen everywhere and
+we have not pinned down why, so treat this as the workaround if you hit it
+rather than something you need to do up front. Same app either way.
 
 Sessions are saved to `projects/{name}/.session.json`, so they survive
 quitting the app or restarting your machine.
+
+### Other commands
+
+The same CLI has a few non-interactive commands, useful for scripting or for
+checking state without opening the full app:
+
+```bash
+uv run --package copilot python3 -m copilot.cli projects
+uv run --package copilot python3 -m copilot.cli show brd --project my-project
+uv run --package copilot python3 -m copilot.cli start --project my-project --problem "..."
+uv run --package copilot python3 -m copilot.cli approve --project my-project --stage ba
+uv run --package copilot python3 -m copilot.cli feedback --project my-project --stage ba
+```
+
+`show` takes `brd`, `prd` or `sources`. `approve` and `feedback` take a
+`--stage` of `ba`, `pe` or `rfc`. Add `-h` to any of them for the full
+options.
 
 ## 6. Run The Plain-Terminal Interactive CLI
 
@@ -259,9 +297,9 @@ uv run python --version
 
 - You're missing the WeasyPrint system libraries, or the environment
   variable that points to them isn't reaching the process. Do step 4 above,
-  in a genuinely new terminal window, and use `python3 -m copilot.cli chat`
-  rather than `mono chat` -- see the note in step 5 for why that specific
-  distinction matters on macOS.
+  in a genuinely new terminal window. If it still fails and you launched with
+  `mono chat`, try `python3 -m copilot.cli chat` instead -- see the note in
+  step 5.
 - Everything except the export itself still works normally while this is
   unresolved -- this only blocks the one "export as pdf" action.
 
