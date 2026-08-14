@@ -89,3 +89,29 @@ CopilotStatusBar {
     text-style: bold;
     color: $text-muted;
 }
+
+.loading-message {
+    border: round #fdb913;
+    color: #fdb913;
+}
+
+.sidebar-project-button {
+    width: 100%;
+    border: round $panel;
+    background: $panel 30%;
+    color: $text;
+    text-align: left;
+    min-width: 0;
+    margin: 0 0 1 0;
+}
+
+.sidebar-project-button:hover {
+    background: $panel 60%;
+}
+
+.sidebar-project-button.current-project {
+    border: round #fdb913;
+    background: #fdb913 15%;
+    color: #fdb913;
+    text-style: bold;
+}

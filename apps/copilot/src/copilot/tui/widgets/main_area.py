@@ -10,5 +10,5 @@ class MainArea(Horizontal):
         self.state_manager = state_manager 
 
     def compose(self):
-        yield copilot.tui.widgets.sidebar.Sidebar()
+        yield copilot.tui.widgets.sidebar.Sidebar(self.state_manager)
         yield Workspace(self.state_manager)

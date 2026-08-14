@@ -10,3 +10,8 @@ class StateUpdated(Message):
     def __init__(self, state: CopilotState) -> None:
         super().__init__()
         self.state = state
+
+class ProjectSelected(Message):
+    def __init__(self, project_name: str) -> None:
+        super().__init__()
+        self.project_name = project_name

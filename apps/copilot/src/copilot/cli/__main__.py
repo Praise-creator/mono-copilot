@@ -1,5 +1,6 @@
 import argparse
 from copilot.cli import commands
+from copilot.tui.app import CopilotApp
 
 
 def parse_args():
@@ -22,7 +23,8 @@ def parse_args():
     feedback.add_argument("--project", required=True)
     feedback.add_argument("--stage", required=True, choices=["ba", "pe", "rfc"])
     feedback.add_argument("--message", required=True)
-    sub.add_parser("chat")
+    chat = sub.add_parser("chat")
+    chat.add_argument("--project", default=None, help="Open the TUI directly into this project")
     return p.parse_args()
 
 
@@ -59,7 +61,7 @@ def main():
         return
 
     if args.cmd == "chat":
-        print("TUI not implemented yet.")
+        CopilotApp(project=args.project).run()
         return
 
     print("Unknown command")
