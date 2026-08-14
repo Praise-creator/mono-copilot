@@ -36,6 +36,19 @@ Failure mode, by design: if mmdc isn't available or a specific diagram fails
 to render, that one mermaid block is left as its original fenced code block
 in the output — visible as text, not silently dropped — rather than failing
 the whole export. A PDF with one diagram shown as source code beats no PDF.
+
+WEASYPRINT IS IMPORTED LAZILY, inside markdown_to_pdf(), not at module load
+time. WeasyPrint needs real system libraries (Pango, GObject) to even
+import, not just the Python package -- and this module is imported by
+router.py, which every chat turn goes through whether or not that turn has
+anything to do with exporting. Importing weasyprint at module level meant a
+misconfigured Pango/GObject install (a real thing that happens per-machine,
+independent of anything in this codebase) took down chat entirely, before a
+single message could be sent. Deferring the import here means a plain
+conversation works regardless of PDF export's environment state, and only
+the actual export attempt -- the one code path that genuinely needs it --
+is where that failure can surface, with a clear message rather than a raw
+OSError.
 """
 
 import re
@@ -47,7 +60,6 @@ from typing import Optional, List
 from datetime import datetime
 
 import markdown as markdown_lib
-from weasyprint import HTML, CSS
 
 from .file_manager import sanitize_project_name
 
@@ -151,6 +163,18 @@ def markdown_to_pdf(markdown_text: str, output_path: Path, title: Optional[str] 
     HTML -> render HTML to PDF with a print-oriented stylesheet. Writes to
     output_path (creating parent directories as needed) and returns it.
     """
+    try:
+        from weasyprint import HTML, CSS
+    except (ImportError, OSError) as exc:
+        raise RuntimeError(
+            "PDF export isn't available on this machine right now -- WeasyPrint "
+            "couldn't load its required system libraries (Pango/GObject). This "
+            "doesn't affect anything else; chat and the rest of the workflow "
+            "work normally. See "
+            "https://doc.courtbouillon.org/weasyprint/stable/first_steps.html#installation "
+            f"for setup steps. Underlying error: {exc}"
+        ) from exc
+
     with tempfile.TemporaryDirectory() as tmp:
         work_dir = Path(tmp)
         rendered = render_mermaid_blocks(markdown_text, work_dir)
