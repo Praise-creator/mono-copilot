@@ -109,7 +109,7 @@ TECHNICAL_SOURCES: Dict[str, Dict[str, object]] = {
 # authorized_sources.py. Until a country's entry here is populated, the
 # Security RFC must say the citation isn't yet available rather than guess.
 DATA_PROTECTION_SOURCES: Dict[str, List[str]] = {
-    "Nigeria": [],       # NDPR (Nigeria Data Protection Regulation) — pending live verification
+    "Nigeria": ["ndpc.gov.ng"],  # Nigeria Data Protection Act 2023, enforced by the NDPC — live-verified 2026-08-10
     "Ghana": [],         # Data Protection Act — pending live verification
     "Kenya": [],         # Data Protection Act — pending live verification
     "South Africa": [],  # POPIA — pending live verification
