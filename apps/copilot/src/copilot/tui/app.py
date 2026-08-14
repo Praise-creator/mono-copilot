@@ -65,7 +65,20 @@ class CopilotApp(App):
         if self.router is not None and self._initial_project:
             self._start_router_call(f"/resume {self._initial_project}")
 
+    # Typed commands the app handles itself, before anything reaches Router.
+    # Router has no idea what /quit means, so without this it falls through to
+    # normal input handling: with a project open it is read as review feedback
+    # and regenerates a document, and with no project open it reaches
+    # IntakeAgent, which is a paid API call. Neither is what someone typing
+    # "/quit" wants. The plain CLI has always supported these, so people
+    # reasonably expect them here too.
+    _EXIT_COMMANDS = ("/quit", "/exit")
+
     def on_user_input_submitted(self, event: UserInputSubmitted):
+        if event.text.strip().lower() in self._EXIT_COMMANDS:
+            self.exit()
+            return
+
         if self._busy:
             return
         self.state_manager.add_message(Message(role="User", content=event.text))

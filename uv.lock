@@ -270,6 +270,7 @@ requires-dist = [
     { name = "python-dotenv", specifier = ">=1.2.2" },
     { name = "rich", specifier = ">=13.7" },
     { name = "runtime", editable = "packages/runtime" },
+    { name = "textual", specifier = ">=0.22.0" },
     { name = "textual", specifier = ">=0.60" },
     { name = "weasyprint", specifier = ">=62.0" },
 ]

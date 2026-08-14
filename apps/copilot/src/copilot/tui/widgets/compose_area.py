@@ -8,7 +8,14 @@ class ComposeArea(TextArea):
 
     BINDINGS = [
         Binding("enter", "submit_message", "Submit", priority=True,),
-        Binding("shift+enter", "newline", "New line",),
+        # ctrl+j is the one that actually works everywhere. Most terminals
+        # send the same bytes for Enter and Shift+Enter, so Textual never
+        # receives "shift+enter" at all and that binding silently does
+        # nothing. Newer terminals that support the enhanced keyboard
+        # protocol (Kitty, WezTerm, Ghostty) do send it, so it is kept for
+        # them rather than removed.
+        Binding("ctrl+j", "newline", "New line"),
+        Binding("shift+enter", "newline", "New line (needs a terminal that sends it)"),
         Binding("ctrl+a", "select_all", "Select all"),
     ]
 
