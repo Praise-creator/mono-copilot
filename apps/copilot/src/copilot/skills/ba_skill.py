@@ -23,6 +23,31 @@ import re
 from openai import AsyncOpenAI
 
 from ..services.research_service import ResearchService
+from ..services.mermaid_validation import validate_mermaid_diagrams, sanitize_mermaid_diagrams
+from ..services.diagram_consistency_service import run_full_diagram_review
+
+
+# Signal words indicating the problem statement actually involves reaching
+# or engaging subscribers directly -- gates the channel-consideration note
+# below so it only fires when relevant, same conditional-on-signal pattern
+# used for pe_skill.py's ML Methodology section. An internal-tooling or
+# network-ops BRD with no subscriber-facing component should never see a
+# note about SMS/USSD vs. app channels; it wouldn't mean anything there.
+_SUBSCRIBER_ENGAGEMENT_KEYWORDS = (
+    "retention offer", "proactive offer", "push notification", "subscriber engagement",
+    "customer engagement", "notify subscribers", "engage subscribers", "outreach",
+)
+
+
+def _mentions_subscriber_engagement(text: str) -> bool:
+    text_lower = text.lower()
+    return any(re.search(r"\b" + re.escape(kw) + r"s?\b", text_lower) for kw in _SUBSCRIBER_ENGAGEMENT_KEYWORDS)
+
+
+_CHANNEL_CONSIDERATION_INSTRUCTION = """
+CHANNEL CONSIDERATION (required -- this problem involves reaching or engaging subscribers directly):
+State explicitly which channel(s) are appropriate for this segment's target subscribers -- do not default to app-only. In many African markets, app-only engagement systematically under-reaches subscribers without an active smartphone data plan, which skews toward exactly the higher-churn-risk segment. Consider SMS and USSD alongside any app-based channel, and justify the choice rather than assuming one.
+"""
 
 
 class BASkill:
@@ -86,6 +111,8 @@ YOUR BA PROCESS:
    When the problem involves more than one system integration or more than two stakeholders,
    draw a Mermaid diagram inline in the document. Do not reference it as a future deliverable.
    Draw it now, as part of the BRD.
+   This diagram visualizes the CUSTOMER JOURNEY / BUSINESS PROCESS from sections 1-2 above -- the actors are business-level (Subscriber, CSR, Care Team, Billing System, Marketing), never the internal technical systems named in section 4's Integration Architecture. A real problem already happened from skipping this distinction: a BA diagram named actual backend component names (a customer data platform, an analytics engine) and drew the exact system-integration diagram that is the Product Engineer's job to draw next -- so the PE had nothing left to add and copied it verbatim into the PRD. Show the same real flow of information between actors, narrated the way a business stakeholder would describe it, not the way an engineer would: "Subscriber has a billing issue -> contacts Customer Care -> CSR reviews the account and either resolves or escalates" is a business-process diagram and belongs here; "CDP -> Analytics Engine -> CRM System" is a system-integration diagram and is not yours to draw.
+   Syntax care matters here specifically, since one inconsistent edge breaks the whole diagram's rendering, not just that edge: an arrow with a label is written `A -->|label| B` (solid arrowhead, label in pipes) — never drop the arrowhead partway through a diagram (`A --|label| B` is invalid). If a node label contains parentheses, wrap the whole label in quotes, e.g. AI["Predictive Engine (v2)"] — an unquoted parenthesis inside a bracketed label is a common cause of the whole diagram failing to render.
 
 QUALITY STANDARDS FOR LARGE-SCALE MNO:
 - All bottlenecks MUST include metrics (seconds, percentages, volumes)
@@ -134,8 +161,23 @@ BE SPECIFIC. BE MEASURABLE. BE IMPLEMENTABLE. BE VERIFIED."""
                     "quality_gates_passed": False
                 }
             
+            # Deterministic punctuation-level cleanup (arrow syntax, unquoted
+            # parens, risky pipe-label characters) -- see mermaid_validation.py.
+            # Runs before quality gates so a fixed diagram is what actually
+            # gets graded and saved, not the pre-fix version.
+            markdown = sanitize_mermaid_diagrams(markdown)
+
+            # Structural (Layer 1) + prose-consistency (Layer 2) diagram review --
+            # see diagram_consistency_service.py. Runs after the punctuation
+            # sanitizer so it's checking the same fixed diagram everything
+            # else grades, and is safe/cheap on a document with zero diagrams.
+            diagram_review = await run_full_diagram_review(markdown)
+
             needs_mermaid = self._should_generate_mermaid(problem_statement, context, markdown)
             quality_gates = self._check_quality_gates(markdown, context, needs_mermaid)
+            # Informational, not mandatory -- same treatment as the existing
+            # mermaid_diagrams gate below, which also isn't in mandatory_gates.
+            quality_gates["diagram_review_ok"] = diagram_review["overall_ok"]
             
             sources_metadata = await self.research_service.extract_and_verify_sources(
                 markdown=markdown,
@@ -166,6 +208,7 @@ BE SPECIFIC. BE MEASURABLE. BE IMPLEMENTABLE. BE VERIFIED."""
                 "markdown": enhanced_markdown,
                 "structured": self._parse_sections(markdown),
                 "sources_metadata": sources_metadata,
+                "diagram_review": diagram_review,
                 "quality_gates": quality_gates,
                 "quality_gates_passed": gates_passed,
                 "approval_required": True,
@@ -213,6 +256,9 @@ PROCESS FLOW PROBLEM:
         if feedback and run_count > 1:
             prompt += f"\nREFINEMENT FEEDBACK (Attempt {run_count}):\n{feedback}\n"
         
+        if _mentions_subscriber_engagement(problem_statement):
+            prompt += _CHANNEL_CONSIDERATION_INSTRUCTION
+        
         prompt += """
 INSTRUCTIONS:
 1. Use web search for regulatory requirements (NCC, NCA, CA, ICASA, TRA)
@@ -223,7 +269,7 @@ INSTRUCTIONS:
    - Integration architecture (all systems, protocols, latencies)
    - Exception management (detection, impact, recovery, support actions)
    - Business rules (validation, authorization, calculation, retention, escalation)
-4. This problem involves multiple system integrations — draw a Mermaid process flow diagram inline now. Do not reference it as a future deliverable.
+4. This problem involves multiple system integrations — draw a Mermaid BUSINESS-PROCESS diagram inline now, using business actors (Subscriber, CSR, Care Team) as drawn in sections 1-2, not the technical system names from section 4. Do not reference it as a future deliverable.
 5. Cite all sources clearly (government bodies, industry analysts)
 6. All metrics MUST be specific (not "fast", but "< 2 seconds")
 7. All regulations MUST be real (not hypothetical)
@@ -335,18 +381,7 @@ INSTRUCTIONS:
         return markdown + references
     
     def _validate_mermaid_syntax(self, markdown: str) -> bool:
-        mermaid_blocks = re.findall(r'```mermaid\n(.*?)\n```', markdown, re.DOTALL)
-        
-        if not mermaid_blocks:
-            return False
-        
-        for block in mermaid_blocks:
-            if not any(kw in block.lower() for kw in ["graph", "flowchart", "sequencediagram", "classdiagram", "statediagram"]):
-                return False
-            if not ("->" in block or "-->" in block or ":" in block):
-                return False
-        
-        return True
+        return validate_mermaid_diagrams(markdown)
     
     def _parse_sections(self, markdown: str) -> Dict:
         sections = {}

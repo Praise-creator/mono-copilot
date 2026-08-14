@@ -44,10 +44,13 @@ from datetime import datetime
 import os
 import re
 
-from agents import Agent, Runner
+from agents import Agent, Runner, function_tool, ModelSettings
 
 from ..services.technical_research_service import TechnicalResearchService
 from ..services.research_service import ResearchService
+from ..services.compliance_lookup_service import fetch_compliance_excerpt
+from ..services.mermaid_validation import validate_mermaid_diagrams, sanitize_mermaid_diagrams
+from ..services.diagram_consistency_service import run_full_diagram_review
 from ..config.technical_sources import get_data_protection_sources
 
 
@@ -89,19 +92,39 @@ def _contains_keyword(text: str, keyword: str) -> bool:
     return re.search(r"\b" + re.escape(keyword) + r"\b", text) is not None
 
 
+@function_tool
+async def fetch_data_protection_excerpt(country: str, topic: str) -> str:
+    """Fetch the real, current text of the verified data-protection law or
+    regulatory directive for a country, and return the excerpt around a
+    specific topic. Call this BEFORE writing the Data Protection /
+    Country-Scoped Compliance section -- quote directly from what this
+    tool returns and cite the exact source URL it reports. Do not
+    paraphrase from memory even if you recognize the law -- only what this
+    tool actually returns is verified. If it returns NOT_FOUND, no
+    verified document (or no matching passage) exists for this
+    country/topic -- say the citation isn't yet available for that
+    specific point rather than asserting one anyway.
+
+    Args:
+        country: The country name exactly as already established in the PRD (e.g. "Nigeria").
+        topic: What to look for in the real document, e.g. "breach notification", "cross-border data transfer", "data retention".
+    """
+    result = await fetch_compliance_excerpt(country, topic)
+    if result is None:
+        return "NOT_FOUND: no verified compliance document excerpt available for this country/topic. State plainly that this specific citation is not yet available."
+    return (
+        f"Source: {result['source_url']}\n\n"
+        f"Real excerpt (quote this directly -- do not paraphrase from memory):\n"
+        f"\"{result['excerpt']}\""
+    )
+
+
 def _validate_mermaid(markdown: str) -> bool:
-    """Shared mermaid validation — same bar as ba_skill.py/pe_skill.py:
-    real content, not a placeholder block."""
-    blocks = re.findall(r"```mermaid\n(.*?)\n```", markdown, re.DOTALL)
-    if not blocks:
-        return False
-    for block in blocks:
-        lines = [l for l in block.strip().split("\n") if l.strip()]
-        if len(lines) < 4:
-            return False
-        if not any(sym in block for sym in ["->", "-->", "|"]):
-            return False
-    return True
+    """Shared mermaid validation — delegates to the one real implementation
+    in mermaid_validation.py, also used by ba_skill.py/pe_skill.py. Kept as
+    a thin wrapper here rather than importing the shared function directly
+    at every call site, so this file's internal call sites don't change."""
+    return validate_mermaid_diagrams(markdown)
 
 
 def _parse_sections(markdown: str) -> Dict:
@@ -136,9 +159,9 @@ You receive an approved PRD. Your job is to design how the humans in this system
 YOUR RFC PROCESS:
 
 1. MAP USER ROLES & JOURNEYS
-   Pull the roles directly from the PRD's user stories — do not invent personas that aren't grounded in the PRD. For each role, describe: entry point, primary tasks, decision points, exit/completion state, as a real sequence.
+   If the PRD states explicit user roles or personas, pull them directly from there and map all of them — dropping one silently is a failure, not an omission a reviewer should have to catch. If the PRD does not define explicit personas (many won't — the PE role's job is technical architecture, not persona definition, and its own prompt doesn't require one), infer the operator roles implied by the PRD's own named components instead: whoever would configure, monitor, or act on a component you can name in the PRD is a role. Say explicitly that these are inferred operator roles rather than roles the PRD stated outright, so a reviewer knows the difference. Either way, ground every role in something actually named in the PRD — never invent a role or task with no connection to a component or requirement the PRD describes.
+   For each role, describe: entry point, primary tasks, decision points, exit/completion state, as a real sequence.
    Example: "Risk Analyst: SSO login -> risk dashboard (filtered to assigned category) -> opens a flagged risk event -> reviews AI-scored probability/impact -> assigns to Risk Manager or edits directly."
-   If the PRD lists 3 roles, you must map all 3. Dropping one silently is a failure, not an omission a reviewer should have to catch.
 
 2. INFORMATION ARCHITECTURE
    Navigation structure, primary views, and the maximum number of clicks or screens to complete the core action for each role. State the number. "A few clicks" is not information architecture, "3 clicks: dashboard -> category filter -> event detail" is.
@@ -158,9 +181,14 @@ YOUR RFC PROCESS:
 
 7. MERMAID DIAGRAM
    Draw the primary user-journey flow as a Mermaid flowchart or sequence diagram, inline, now. This is the one RFC role where the diagram is not conditional — draw it every time.
+   If there is more than one distinct role, draw ONE small diagram per role (a separate ```mermaid block for each) rather than combining every role's journey into a single diagram. A real problem already happened from combining them: three roles' journeys folded into one sequence diagram produced 13 participant lanes in a single diagram, which is technically valid Mermaid but genuinely hard to read — a reader has to track one role's 3-4 step path across 13 columns. Three focused diagrams communicate the same information far better than one overloaded one. Only combine roles into a single diagram if they share the same few steps and separating them would be pure duplication.
+   If a role's own Decision Points describe a real branch (the user genuinely does one of two or more different things depending on a condition), draw that branch in the diagram — a rhombus/decision node with 2+ outgoing edges, not a straight chain that quietly drops the decision the prose just described. A real problem already happened from skipping this: three roles' sections each stated a decision point, and all three diagrams were pure straight-line chains with no branch anywhere — the diagram and the prose next to it were describing two different things.
+   Use a shape that matches what the node actually is: a plain rectangle `NodeId["text"]` for a screen, view, or user action; a rhombus `NodeId{"text"}` for an actual decision point; a cylinder `NodeId[("text")]` ONLY for a literal data store (a database, a queue, a cache) — never for a login screen, a dashboard, or any other UI step. Every shape needs its own node id in front of it, the same as any other node — a bare `{"text"}` with nothing before it is not a valid node reference at all, it's a syntax error, and it will break the whole diagram's rendering the same way a missing arrowhead does. A real problem already happened from exactly this: a decision node was written as a bare `{"Decision Point: Action Needed?"}` with no id, referenced that same bare way on every branch out of it, and the entire diagram failed to render as a result. Give every decision node a real id — `Decision{"Decision Point: Action Needed?"}` — and reuse that same id every time you reference it again, the same way you already would for any rectangle or cylinder node. A second, separate problem already happened too: every node across three separate journey diagrams used the cylinder shape, including screens like "SSO Login" and steps like "Action Selection" that aren't data stores at all — cylinder means database in Mermaid's own visual vocabulary, and using it for a login screen actively misleads whoever reads the rendered diagram.
+   If any node label contains parentheses (e.g. a role or state annotation), wrap the whole label in quotes, e.g. Dashboard["Risk Dashboard (filtered)"] — an unquoted parenthesis inside a bracketed label is a common cause of the whole diagram failing to render.
+   Write each edge as ONE complete line, and make sure a pipe label opens and closes on that same line: `A -->|label| B`. A real problem already happened from getting this wrong: one statement got torn across a line break in the middle of its pipe label — the first line opened a label and never closed it, then a node declaration appeared inside where the label text should have been, then the next line began with the leftover tail of the label and a stray closing pipe. The whole diagram failed to render, and because the malformed text had two different plausible readings there was no safe way to repair it automatically — it had to be regenerated from scratch. Decide what each edge says before you start writing it, then write it as a single unbroken line, and declare any decision node on its own separate line rather than inside another edge's label.
 
 QUALITY STANDARDS:
-- Every role named in the PRD's user stories must have a mapped journey. No invented personas beyond what the PRD/BRD already established.
+- Every role must have a mapped journey — whether pulled directly from PRD-stated personas or reasonably inferred from named components, and clearly labeled which one it is. No role invented with zero connection to anything the PRD actually names.
 - Every primary view must cover all 4 interaction states (loading/empty/error/success).
 - Accessibility citations must reference real WCAG 2.1 success-criteria numbers, not just the word "accessible".
 - Information architecture must state an actual click/screen count, not a vague description.
@@ -183,7 +211,9 @@ YOUR RFC PROCESS:
 
 3. DATA FLOW
    Trace one complete request or event through every component it touches. State explicitly which hops are synchronous and which are asynchronous/queued.
+   Write this as PLAIN PROSE ARROWS ONLY -- "A -> B (protocol, latency) -> C" -- never as Mermaid-style bracket/quote node syntax like A["B"] --> C["D"]. This section is not a diagram and is not fenced as one; a real run produced exactly this confusion once already, writing the trace with bracket-and-quote node syntax inside a plain code fence, which then rendered as inert code text instead of being read as a sentence, AND collapsed several genuinely parallel hops (e.g. one system fanning out to three independent downstream channels) into what read as one serial chain through all three -- implying each channel triggers the next, which was not true. If a component fans out to more than one destination, write that as separate trace lines, one per destination, exactly the way section 7's diagram would draw them as separate edges -- never chain unrelated destinations into a single arrow sequence just because they share a source.
    Example: "Scraper -> message queue (async) -> Scoring Service (consumes) -> writes to risk_events table -> publishes risk.created event -> Notification Service (consumes) -> alerts Risk Manager."
+   CRITICAL: this trace must exactly match the Mermaid diagram you draw in section 7 -- same components, same direction on every hop, same fan-out/fan-in shape. A real bug already happened from skipping this: the diagram correctly showed Data Lake feeding INTO the Predictive Analytics Engine, but the prose trace next to it described data flowing the opposite direction, and a third, single-line notation described a third, different path again -- three representations of one data flow that all disagreed with each other, none of them individually "broken" syntax, just inconsistent with each other. Draw the diagram first if that makes this easier, then write the prose trace by reading the arrows you just drew, not by reasoning about the architecture a second time from scratch. If you write any other restatement of the flow elsewhere in this document (a summary line, a one-line notation), it must also match the diagram -- never let a second description quietly invert a hop, drop a hop, or flatten a fan-out into a serial chain that the diagram doesn't actually show.
 
 4. SCALABILITY
    Tie this directly to the PRD's actual stated growth or NFR numbers (not a generic claim). Name the specific mechanism: horizontal autoscaling, read replicas, caching layer, sharding — and why that mechanism fits this specific bottleneck.
@@ -196,6 +226,9 @@ YOUR RFC PROCESS:
 
 7. MERMAID DIAGRAM
    A system architecture diagram is mandatory here — components, data stores, message flows, external integrations, drawn inline now. Name things exactly as you named them in section 1, since other RFCs will reference this diagram's vocabulary.
+   This diagram must show something the PRD's own system architecture diagram does not — implementation depth means new STRUCTURE, not richer labels on the same boxes and arrows. A real problem already happened from missing this: a diagram came out with the exact same nodes and edges as the PRD's diagram, just with protocol names and "(Extended)"/"(Built)" tags added to the labels — structurally identical, relabeled, adding no real depth, and it slipped past an automated similarity check that only compared node IDs rather than what the diagram actually showed. Use Mermaid subgraphs to show the deployment boundaries from section 2 — group nodes by where they actually run, e.g. `subgraph "Cloud (Nigeria region)"` containing the components deployed there, with replica counts folded into the node label — so the diagram shows something the PRD's logical data-flow diagram physically could not: where things run and how they're grouped for scaling and failure isolation.
+   Node-label safety matters here specifically, since this diagram's node labels often carry a status suffix like "(Extended)" or "(Built)": if a label contains parentheses, wrap the whole label in quotes, e.g. CRM["CRM System (Extended)"] — never CRM[CRM System (Extended)] unquoted. Never write a node as id[(text)] unless a cylinder/database shape is actually intended — that exact bracket-paren pair is reserved shape syntax, not a way to show literal parenthesized text, and combined with other unquoted parenthetical labels it can break the whole diagram's parsing, not just that one node.
+   Arrow labels always go in pipes on a single arrow token — `A -->|label| B` — never as a quoted string sitting between two dashes (`A -- "label" --> B` is invalid, on any arrow style, solid, dotted, or thick) and never on a reversed arrow (`A <-- "label" -- B`). A real problem already happened from both at once: a diagram used the quoted-dash form on every single edge, including one written backwards, and the whole diagram failed to render as a result — not just the malformed edges, the entire diagram, since one invalid line breaks the parse for all of it. If unsure, prefer the plain forward form `A -->|label| B` throughout, the same rule DevOps's prompt already follows, and always write the edge from actual source to actual target rather than reversing the statement.
 
 8. STANDARDS GROUNDING
    For at least one of your scalability decisions and at least one of your failure-isolation decisions, name the specific framework you are drawing on — write the literal phrase, for example "per the AWS Well-Architected Framework's Reliability pillar" or "per the AWS Well-Architected Framework's Performance Efficiency pillar," or the equivalent Azure Architecture Center reference if that fits the stack better. Do not just describe good practice and leave it unattributed — name the standard explicitly, the same way the Security RFC names OWASP ASVS sections.
@@ -231,13 +264,14 @@ YOUR RFC PROCESS:
    Every state-changing operation gets logged — this project's established pattern, carry it forward here. Specify what's in each log entry (actor, action, timestamp, before/after state), where logs go, retention period, and tamper-evidence approach.
 
 6. DATA PROTECTION / COUNTRY-SCOPED COMPLIANCE
-   If a country is identified (reuse whatever country the BRD/PRD already established — do not re-guess or invent one), cite that country's data-protection law ONLY if a verified citation is available to you. If none is available, you MUST say so explicitly — write something like "data-protection law citation for [country] not yet in the verified source list — confirm before relying on this section" rather than asserting a URL or regulation you cannot verify. This project has already had to correct invented whitelist URLs once; do not repeat that here. If no country is identified at all, say so generically rather than picking one.
+   If a country is identified (reuse whatever country the BRD/PRD already established — do not re-guess or invent one), call the fetch_data_protection_excerpt tool for that country BEFORE writing this section — at minimum once for "breach notification" and once for "cross-border data transfer". Quote directly from what the tool returns and cite the exact source URL it reports; do not paraphrase from memory even if you recognize the law, since only what the tool actually returns is verified. If the tool returns NOT_FOUND for a topic, say explicitly that citation isn't yet available for that specific point rather than asserting one. If no country is identified at all, say so generically rather than picking one and calling the tool speculatively.
 
 7. INCIDENT RESPONSE
    Detection -> containment -> eradication -> recovery -> post-incident review. Reference the DevOps RFC's monitoring and alerting rather than duplicating it — this section is about the response process, not the detection mechanism itself.
 
 8. MERMAID DIAGRAM (conditional)
    Only include one if the threat model spans several distinct trust boundaries and a diagram would clarify where they sit — a security architecture or trust-boundary diagram. Do not force one in if the system is simple enough that prose covers it clearly.
+   If you do include one: an arrow with a label is written `A -->|label| B` — never drop the arrowhead (`A --|label| B` is invalid). If a node label contains parentheses, wrap the whole label in quotes, e.g. CPS["Churn Prediction Service (v2)"].
 
 QUALITY STANDARDS:
 - The threat model must reference real component names, never generic categories with nothing attached.
@@ -269,6 +303,7 @@ YOUR RFC PROCESS:
 
 6. MERMAID DIAGRAM (conditional)
    Only if the test or environment-promotion flow itself is complex enough to need one (e.g. a multi-environment promotion pipeline with several gates) — this is not a default-on diagram the way Software Architect's and DevOps's are.
+   If you do include one: an arrow with a label is written `A -->|label| B` — never drop the arrowhead (`A --|label| B` is invalid). If a node label contains parentheses, wrap the whole label in quotes.
 
 QUALITY STANDARDS:
 - Every PRD acceptance criterion must map to at least one named test case — no acceptance criterion left untested by the time this RFC is done.
@@ -304,7 +339,10 @@ YOUR RFC PROCESS:
 
 7. MERMAID DIAGRAM
    A deployment/pipeline architecture diagram is mandatory here — environments, promotion flow, and where monitoring touches each stage, drawn inline now.
-   Syntax care matters here specifically: keep an arrow's style consistent from start to end. A dotted/monitoring-style connection with a label is written `A -.->|label| B` (dotted start, dotted arrowhead, label in pipes) — never mix a dotted start with a solid arrowhead (`A -. "label" --> B` is invalid and will fail to render). If unsure, prefer the plain solid form `A -->|label| B` throughout rather than risk an inconsistent dotted/solid mix.
+   Use `graph TD` (top-down), not `graph LR`, for the pipeline flow. A real problem already happened from this: a left-to-right pipeline with a nine-stage chain rendered as one extremely wide row, and once scaled down to fit the page width in the exported PDF every label was too small to read. Top-down grows the image downward instead, which doesn't compete with page width. If the pipeline genuinely has more than about seven stages in a single unbroken chain, split it into two diagrams (e.g. build-and-test in one, deploy-and-monitor in the other) rather than stretching one diagram across the page — a diagram nobody can read communicates nothing, however correct its contents.
+   Syntax care matters here specifically: keep an arrow's style consistent from start to end. A dotted/monitoring-style connection with a label is written `A -.->|label| B` (dotted start, dotted arrowhead, label in pipes) — never mix a dotted start with a solid arrowhead (`A -. "label" --> B` is invalid), and never write a label as a bare quoted string sandwiched between two dot fragments either (`A -. "label" .-> B` is also invalid — the label always goes in pipes on a single `-.->`, never between two separate dots). This same mistake applies to every arrow style, not just dotted — `A -- "label" --> B` (solid) and `A == "label" ==> B` (thick) are exactly as invalid, and so is the reversed form on any style (`A <-- "label" -- B`). If unsure, prefer the plain solid form `A -->|label| B` throughout rather than risk an inconsistent mix, and always write the edge from actual source to actual target rather than reversing the statement.
+   A pipe label must open and close on the SAME line: `A -->|label| B`. Never let a label run past the end of a line, and never start a new line with the tail of a label — a real problem already happened from this in another RFC, where one statement got torn across a line break mid-label and the whole diagram failed to render with no way to recover what was intended. Write each edge as one complete line.
+   Same care applies to node labels: if a label contains parentheses (e.g. an environment or status annotation), wrap the whole label in quotes, e.g. Prod["Production (blue)"] — an unquoted parenthesis inside a bracketed label is a common cause of the whole diagram failing to render. Never nest a different bracket type inside a node's own shape delimiter either — e.g. Stage(Text [Extra]) mixing round-paren and square-bracket, or Config{["Text"]} mixing curly braces with square brackets — pick exactly one real shape delimiter ([text], (text), {text}, {{text}}, [[text]], or [(text)]) and keep the label plain text inside it.
 
 QUALITY STANDARDS:
 - Monitoring must cover all 5 layers with real numeric thresholds attached to each, not a statement that monitoring will happen.
@@ -368,7 +406,16 @@ def _check_software_architect_gates(markdown: str) -> Dict[str, bool]:
     )
 
     arrow_count = markdown.count("->") + markdown.count("\u2192")
-    data_flow = arrow_count >= 2 and any(kw in text for kw in ["sync", "async"])
+    # Either the literal sync/async wording OR a per-hop latency annotation
+    # like (REST API, <200ms) counts as concrete tracing -- a real run
+    # showed this gate false-negative on a genuinely complete trace after
+    # the DATA FLOW prompt was rewritten to favor "A -> B (protocol,
+    # latency) -> C" phrasing over explicit sync/async labels. The content
+    # was fully concrete either way; the gate just hadn't been updated
+    # alongside the prompt.
+    has_sync_async_wording = any(kw in text for kw in ["sync", "async"])
+    has_latency_annotation = bool(re.search(r"\(.*\d+\s*(ms|s|sec|second)\b", text))
+    data_flow = arrow_count >= 2 and (has_sync_async_wording or has_latency_annotation)
 
     scalability = (
         "scal" in text and
@@ -552,10 +599,33 @@ class RFCSkill:
 
     def _build_agent(self, role: str) -> Agent:
         config = ROLE_CONFIGS[role]
+        # Only the Security role gets the compliance-fetch tool -- it's the
+        # only role whose prompt asks for it, and attaching it everywhere
+        # would just be an unused capability sitting on 4 agents that never
+        # reference it.
+        if role == "security":
+            # tool_choice="required" forces a tool call on the agent's first
+            # turn -- confirmed necessary on a real run: with tool_choice
+            # left at its default, gpt-4-turbo simply didn't call the tool
+            # and wrote "not explicitly provided through a verified source"
+            # on its own initiative instead, even though the prompt already
+            # said to call it. This isn't a guess at the fix -- checked the
+            # installed SDK's own source (run_internal/tool_execution.py,
+            # maybe_reset_tool_choice): once the agent has used a tool,
+            # tool_choice is automatically reset to None for every
+            # subsequent turn, so this forces exactly the one call needed
+            # and doesn't force a repeated-tool-call loop afterward.
+            tools = [fetch_data_protection_excerpt]
+            model_settings = ModelSettings(tool_choice="required")
+        else:
+            tools = []
+            model_settings = ModelSettings()
         return Agent(
             name=f"{config.display_name} RFC Agent",
             instructions=config.system_prompt,
             model=MODEL,
+            tools=tools,
+            model_settings=model_settings,
         )
 
     def _build_user_prompt(
@@ -690,7 +760,26 @@ SYSTEM-DESIGN RFC (from the Software Architect role, for cross-reference — use
                     "quality_gates_passed": False,
                 }
 
+            # Deterministic punctuation-level cleanup -- see mermaid_validation.py
+            # and ba_skill.py's identical wiring for why this runs before gates.
+            markdown = sanitize_mermaid_diagrams(markdown)
+
+            # Structural (Layer 1) + prose-consistency (Layer 2) diagram review,
+            # same as ba_skill.py/pe_skill.py. Layer 3 (cross-document similarity)
+            # only applies to software_architect: it's the one role whose own
+            # prompt explicitly says its job is to add implementation depth beyond
+            # the PRD, so comparing its diagram against the PRD's own diagram is
+            # checking it against its own stated mandate, not an arbitrary rule --
+            # a real run showed this RFC's system-architecture diagram came out
+            # 100% structurally identical to the PRD's, adding no depth at all.
+            compare_against = prd_markdown if role == "software_architect" else None
+            diagram_review = await run_full_diagram_review(markdown, compare_against_markdown=compare_against)
+
             quality_gates = config.check_gates(markdown)
+            # RFC's gates_passed below is all(quality_gates.values()) -- unlike
+            # BA/PE, this genuinely counts toward the role's pass/fail summary,
+            # matching how mermaid_diagram_present is already treated for RFCs.
+            quality_gates["diagram_review_ok"] = diagram_review["overall_ok"]
 
             sources_metadata = await self.technical_research_service.extract_and_verify_sources(
                 markdown=markdown,
@@ -724,6 +813,7 @@ SYSTEM-DESIGN RFC (from the Software Architect role, for cross-reference — use
                 "markdown": enhanced_markdown,
                 "structured": _parse_sections(markdown),
                 "sources_metadata": sources_metadata,
+                "diagram_review": diagram_review,
                 "quality_gates": quality_gates,
                 "quality_gates_passed": gates_passed,
                 "approval_required": True,
@@ -743,8 +833,17 @@ SYSTEM-DESIGN RFC (from the Software Architect role, for cross-reference — use
 
     def _add_verified_footnotes(self, markdown: str, sources_metadata: Dict, role: str) -> str:
         """Same footnote format as ba_skill.py/pe_skill.py, plus a Security-only
-        data-protection status line so the 'not yet available' case is visible
-        in the document itself, not just buried in the JSON sources file."""
+        data-protection citation. The data-protection source gets its own
+        real, inspectable [DP-n] citation (URL, authority, verified date) —
+        kept in a separate subsection rather than folded into the
+        engineering-standards numbered list above it, since those are two
+        categorically different kinds of source (technical_sources.py's own
+        docstring is explicit about this) and merging them would make
+        "Total sources verified"/hallucination-risk silently stop meaning
+        what it says. Built independently of the `sources` empty-check below
+        so the data-protection section still renders correctly even when an
+        RFC has zero engineering-standard sources — a bare "available, see
+        references above" pointing at nothing was the actual bug here."""
         sources = sources_metadata.get("sources_used", [])
 
         if not sources:
@@ -769,8 +868,16 @@ SYSTEM-DESIGN RFC (from the Software Architect role, for cross-reference — use
 
         if role == "security" and "data_protection" in sources_metadata:
             dp = sources_metadata["data_protection"]
-            if dp.get("data_protection_citation_available"):
-                references += f"\nData-protection law citation for {dp['country']}: available, see references above.\n"
+            verified_urls = dp.get("data_protection_sources_verified") or []
+            if dp.get("data_protection_citation_available") and verified_urls:
+                references += "\n### Data Protection / Compliance Citation\n\n"
+                for idx, url in enumerate(verified_urls, 1):
+                    full_url = url if url.startswith("http") else f"https://{url}"
+                    references += f"[DP-{idx}] Data protection / privacy law compliance for {dp['country']}\n"
+                    references += f"- Source: {full_url}\n"
+                    references += "- Authority: HIGH | Confidence: HIGH\n"
+                    references += f"- Verified: {datetime.now().isoformat()}\n\n"
+                references += f"Data-protection law citation for {dp['country']}: available, see citation above.\n"
             else:
                 references += (
                     f"\nData-protection law citation for {dp['country']}: NOT YET VERIFIED in the "
