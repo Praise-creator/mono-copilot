@@ -40,7 +40,10 @@ class OrchestratorState(Enum):
     PE_REWORKING = "pe_reworking"
     PE_DEEP_DIVE = "pe_deep_dive"
     PE_FAILED = "pe_failed"
-    PE_JUMP_BACK_TO_BA = "pe_jump_back_to_ba"
+    # PE_JUMP_BACK_TO_BA was removed rather than kept unused. The
+    # jump_back_to_ba decision now lands on BA_APPROVAL, so nothing sets or
+    # reads this value, and leaving it in the enum would keep advertising a
+    # state the workflow can no longer reach.
     RFC_PENDING = "rfc_pending"
     RFC_APPROVAL = "rfc_approval"
     RFC_CLARIFYING = "rfc_clarifying"
@@ -365,7 +368,15 @@ class Orchestrator:
 
             feedback = "\n".join([f"{k}: {v}" for k, v in responses.items()])
 
-            if stage == "ba" and current_stage == OrchestratorState.BA_CLARIFYING.value:
+            # Deep dive is accepted here alongside clarifying. Both mean "the
+            # user is answering a request for feedback"; the only difference
+            # is that deep dive asks for more detail. Accepting only
+            # clarifying left ba_deep_dive as a state nothing could act on,
+            # which is the same dead end this change fixes for reworking.
+            if stage == "ba" and current_stage in (
+                OrchestratorState.BA_CLARIFYING.value,
+                OrchestratorState.BA_DEEP_DIVE.value,
+            ):
                 self.context_manager.update_session(project_name, "stage", OrchestratorState.BA_REWORKING.value)
                 current_run += 1
                 self.context_manager.update_session(project_name, "run_count", current_run)

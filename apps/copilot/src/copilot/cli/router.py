@@ -470,17 +470,19 @@ class Router:
         enriched = resolve_line_reference(text, document)
         feedback = enriched or text
 
-        if base_stage in ("ba", "pe"):
-            # BA/PE need the explicit needs_changes transition first (moves
-            # ba_approval -> ba_clarifying) before a clarification response
-            # is valid — same two-step orchestrator.py already requires.
-            clarify = await self.orchestrator.handle_approval(project_name=self.active_project, stage=base_stage, decision="needs_changes")
-            if clarify.get("status") != "success":
-                return RouterResult(kind="error", message=clarify.get("message", "Could not start a rework."), active_project=self.active_project)
-        elif session.get("stage", "").endswith("_approval"):
-            # RFC approval -> clarifying needs the same transition; RFC
-            # clarifying/deep_dive (reached via _handle_within_project
-            # directly) is already past it.
+        # Only an approval gate needs the explicit needs_changes transition
+        # first (ba_approval -> ba_clarifying) before a clarification response
+        # is valid. Anything already past that gate, clarifying or deep dive,
+        # goes straight through.
+        #
+        # This used to run unconditionally for BA and PE, which made
+        # ba_deep_dive unusable: handle_approval rejects needs_changes unless
+        # the stage is ba_approval, so answering the deep dive prompt got
+        # "Cannot approve BA at stage ba_deep_dive" and the session had no way
+        # forward. The RFC branch already had the right condition; BA and PE
+        # now share it rather than keeping a second rule that only worked from
+        # one of the two states it was reachable in.
+        if session.get("stage", "").endswith("_approval"):
             clarify = await self.orchestrator.handle_approval(project_name=self.active_project, stage=base_stage, decision="needs_changes")
             if clarify.get("status") != "success":
                 return RouterResult(kind="error", message=clarify.get("message", "Could not start a rework."), active_project=self.active_project)
