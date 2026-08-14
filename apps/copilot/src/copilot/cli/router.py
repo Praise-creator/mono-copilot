@@ -470,17 +470,19 @@ class Router:
         enriched = resolve_line_reference(text, document)
         feedback = enriched or text
 
-        if base_stage in ("ba", "pe"):
-            # BA/PE need the explicit needs_changes transition first (moves
-            # ba_approval -> ba_clarifying) before a clarification response
-            # is valid — same two-step orchestrator.py already requires.
-            clarify = await self.orchestrator.handle_approval(project_name=self.active_project, stage=base_stage, decision="needs_changes")
-            if clarify.get("status") != "success":
-                return RouterResult(kind="error", message=clarify.get("message", "Could not start a rework."), active_project=self.active_project)
-        elif session.get("stage", "").endswith("_approval"):
-            # RFC approval -> clarifying needs the same transition; RFC
-            # clarifying/deep_dive (reached via _handle_within_project
-            # directly) is already past it.
+        # Only an approval gate needs the explicit needs_changes transition
+        # first (ba_approval -> ba_clarifying) before a clarification response
+        # is valid. Anything already past that gate, clarifying or deep dive,
+        # goes straight through.
+        #
+        # This used to run unconditionally for BA and PE, which made
+        # ba_deep_dive unusable: handle_approval rejects needs_changes unless
+        # the stage is ba_approval, so answering the deep dive prompt got
+        # "Cannot approve BA at stage ba_deep_dive" and the session had no way
+        # forward. The RFC branch already had the right condition; BA and PE
+        # now share it rather than keeping a second rule that only worked from
+        # one of the two states it was reachable in.
+        if session.get("stage", "").endswith("_approval"):
             clarify = await self.orchestrator.handle_approval(project_name=self.active_project, stage=base_stage, decision="needs_changes")
             if clarify.get("status") != "success":
                 return RouterResult(kind="error", message=clarify.get("message", "Could not start a rework."), active_project=self.active_project)
@@ -520,9 +522,13 @@ class Router:
 
         if stage in ("ba_approval", "pe_approval"):
             doc_label = "BRD" if stage == "ba_approval" else "PRD"
+            # Quality gate detail deliberately left out here -- that's an
+            # internal QA signal for the team, not something the person
+            # driving this pipeline needs to see turn by turn. It's still
+            # fully present in result["quality_gates"] and the RouterResult
+            # data below for anything that actually needs it.
             message = (
                 f"{doc_label} ready -> {result.get('file_path')}\n"
-                f"Quality gates: {result.get('quality_gates')}\n"
                 f"{result.get('message', '')}\n"
                 f"(Say 'export as pdf' anytime if you'd like a copy of this.)"
             )
@@ -548,17 +554,21 @@ class Router:
         return RouterResult(kind="message", message=result.get("message", str(result)), active_project=self.active_project)
 
     def _summarize_rfc_result(self, result: Dict) -> str:
+        # Same reasoning as the BA/PE gate line above: pass/fail counts per
+        # role are an internal QA signal, not something worth surfacing to
+        # whoever is driving the pipeline turn by turn. A role that
+        # genuinely failed to generate is a different, actionable thing --
+        # that still gets shown, since it means something actually broke,
+        # not just that a quality heuristic came back short.
         lines = ["RFCs:"]
         for role in RFC_ROLES:
             gates = result.get("quality_gates_by_role", {}).get(role, {})
-            passed = result.get("quality_gates_passed_by_role", {}).get(role)
             error = result.get("errors", {}).get(role)
             display = ROLE_DISPLAY_NAMES.get(role, role)
             if error:
-                lines.append(f"  [{role}] {display}: FAILED — {error}")
+                lines.append(f"  {display}: failed -- {error}")
             elif gates:
-                overall = "PASS" if passed else "FAIL"
-                lines.append(f"  [{role}] {display}: {overall} ({sum(gates.values())}/{len(gates)})")
+                lines.append(f"  {display}: generated")
         lines.append(result.get("message", ""))
         return "\n".join(lines)
 

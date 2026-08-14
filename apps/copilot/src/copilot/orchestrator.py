@@ -1,7 +1,12 @@
 """
-Orchestrator - Controls the 13-state workflow for BRD → PRD → ADR generation.
+Orchestrator - Controls the BRD -> PRD -> RFC workflow (20 states across three
+stages, each with its own approval/clarifying/reworking/deep-dive/failed
+cycle). ADR synthesis is a later, separate stage owned outside this class --
+see the "done" message below for where this orchestrator's responsibility
+actually ends.
 
-Routes: draft → ba_pending → ba_approval → pe_pending → pe_approval → adr_pending → done
+Routes: draft -> ba_pending -> ba_approval -> pe_pending -> pe_approval ->
+rfc_pending -> rfc_approval -> done
 Handles: approval gates, quality checks, clarification feedback, deep dives
 """
 
@@ -22,7 +27,7 @@ from .skills.rfc_skill import RFC_ROLES, ROLE_ALIASES
 
 
 class OrchestratorState(Enum):
-    """13-state workflow per Master Prompt."""
+    """Every stage the workflow can be in, across BA, PE, and RFC."""
     BA_PENDING = "ba_pending"
     BA_APPROVAL = "ba_approval"
     BA_CLARIFYING = "ba_clarifying"
@@ -35,7 +40,10 @@ class OrchestratorState(Enum):
     PE_REWORKING = "pe_reworking"
     PE_DEEP_DIVE = "pe_deep_dive"
     PE_FAILED = "pe_failed"
-    PE_JUMP_BACK_TO_BA = "pe_jump_back_to_ba"
+    # PE_JUMP_BACK_TO_BA was removed rather than kept unused. The
+    # jump_back_to_ba decision now lands on BA_APPROVAL, so nothing sets or
+    # reads this value, and leaving it in the enum would keep advertising a
+    # state the workflow can no longer reach.
     RFC_PENDING = "rfc_pending"
     RFC_APPROVAL = "rfc_approval"
     RFC_CLARIFYING = "rfc_clarifying"
@@ -46,7 +54,7 @@ class OrchestratorState(Enum):
 
 
 class Orchestrator:
-    """Orchestrates 13-state workflow for document generation."""
+    """Orchestrates the BA -> PE -> RFC document generation workflow."""
 
     def __init__(self):
         self.context_manager = ContextManager()
@@ -135,7 +143,7 @@ class Orchestrator:
                 "file_path": brd_path,
                 "approval_required": True,
                 "quality_gates": quality_gates,
-                "message": "BRD generated successfully. Awaiting approval."
+                "message": "BRD generated successfully. Awaiting approval to move on to the PRD."
             }
 
         except Exception as e:
@@ -216,7 +224,7 @@ class Orchestrator:
                         "file_path": prd_path,
                         "approval_required": True,
                         "quality_gates": pe_result.get("quality_gates", {}),
-                        "message": "PRD generated. Awaiting approval."
+                        "message": "PRD generated. Awaiting approval to move on to the RFCs."
                     }
 
                 elif decision in ["needs_changes", "clarification"]:
@@ -268,16 +276,22 @@ class Orchestrator:
 
                     return self._build_rfc_response(
                         rfc_results,
-                        "All RFCs generated. Review and approve, or describe what needs to change "
-                        "(name the role, e.g. 'security: add MFA detail')."
+                        "All RFCs generated. Awaiting approval to complete the workflow, or describe "
+                        "what needs to change (name the role, e.g. 'security: add MFA detail')."
                     )
 
                 elif decision == "jump_back_to_ba":
-                    self.context_manager.update_session(project_name, "stage", OrchestratorState.PE_JUMP_BACK_TO_BA.value)
+                    # Was OrchestratorState.PE_JUMP_BACK_TO_BA -- a state
+                    # nothing else read, so the session could never move on
+                    # from here. ba_approval is what the message already
+                    # promises: a valid BRD sitting there, ready to approve
+                    # again or send through the same needs_changes -> feedback
+                    # rework path BA already supports.
+                    self.context_manager.update_session(project_name, "stage", OrchestratorState.BA_APPROVAL.value)
                     return {
                         "status": "success",
-                        "stage": "pe_jump_back_to_ba",
-                        "message": "Jumped back to BA. You can now modify the BRD."
+                        "stage": "ba_approval",
+                        "message": "Jumped back to BA. The BRD is available to approve again or send back for changes."
                     }
 
                 elif decision in ["needs_changes", "clarification"]:
@@ -303,10 +317,8 @@ class Orchestrator:
                     return {
                         "status": "success",
                         "stage": "done",
-                        "message": "Workflow complete. BRD, PRD, and all 5 RFCs approved. "
-                                   "Ready for ADR synthesis (out of scope here — see "
-                                   f"{markdown_dir}/ for the RFC files, or get_rfc_tools() "
-                                   "for the tool-exposed versions)."
+                        "message": f"Workflow complete. BRD, PRD, and all 5 RFCs approved. "
+                                   f"Files are in {markdown_dir}/."
                     }
 
                 elif decision in ["needs_changes", "clarification"]:
@@ -356,7 +368,15 @@ class Orchestrator:
 
             feedback = "\n".join([f"{k}: {v}" for k, v in responses.items()])
 
-            if stage == "ba" and current_stage == OrchestratorState.BA_CLARIFYING.value:
+            # Deep dive is accepted here alongside clarifying. Both mean "the
+            # user is answering a request for feedback"; the only difference
+            # is that deep dive asks for more detail. Accepting only
+            # clarifying left ba_deep_dive as a state nothing could act on,
+            # which is the same dead end this change fixes for reworking.
+            if stage == "ba" and current_stage in (
+                OrchestratorState.BA_CLARIFYING.value,
+                OrchestratorState.BA_DEEP_DIVE.value,
+            ):
                 self.context_manager.update_session(project_name, "stage", OrchestratorState.BA_REWORKING.value)
                 current_run += 1
                 self.context_manager.update_session(project_name, "run_count", current_run)
@@ -383,6 +403,22 @@ class Orchestrator:
                             "status": "success",
                             "stage": "ba_deep_dive",
                             "message": "Entering deep dive mode. Provide detailed feedback."
+                        }
+                    else:
+                        # A transient failure (rate limit, timeout, etc.) below
+                        # both thresholds above previously fell through into
+                        # the success path with ba_result as None/error-shaped,
+                        # crashing on save_brd and leaving the stage stuck at
+                        # ba_reworking with no way out. The BRD on disk was
+                        # never touched (the crash happened before save_brd),
+                        # so ba_approval is a real, valid state to return to.
+                        self.context_manager.update_session(project_name, "stage", OrchestratorState.BA_APPROVAL.value)
+                        error_detail = (ba_result or {}).get("error") or "no response from the agent"
+                        return {
+                            "status": "error",
+                            "message": f"BRD rework attempt {current_run} failed ({error_detail}). "
+                                       "The previous BRD is unchanged -- try again, or give different feedback.",
+                            "stage": "ba_approval"
                         }
 
                 brd_markdown = ba_result.get("markdown", "")
@@ -428,6 +464,23 @@ class Orchestrator:
                             "status": "error",
                             "message": "PRD generation failed after max attempts",
                             "stage": "pe_failed"
+                        }
+                    else:
+                        # Same shape as the BA fix above: a transient failure
+                        # below max_attempts previously fell through into the
+                        # success path with pe_result as None/error-shaped,
+                        # crashing on save_prd and leaving the stage stuck at
+                        # pe_reworking. PE has no deep-dive tier of its own --
+                        # left that way here rather than adding one as a side
+                        # effect of this fix; whether PE should get one too is
+                        # a separate decision.
+                        self.context_manager.update_session(project_name, "stage", OrchestratorState.PE_APPROVAL.value)
+                        error_detail = (pe_result or {}).get("error") or "no response from the agent"
+                        return {
+                            "status": "error",
+                            "message": f"PRD rework attempt {current_run} failed ({error_detail}). "
+                                       "The previous PRD is unchanged -- try again, or give different feedback.",
+                            "stage": "pe_approval"
                         }
 
                 prd_markdown = pe_result.get("markdown", "")
