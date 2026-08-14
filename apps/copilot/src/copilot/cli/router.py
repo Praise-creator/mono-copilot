@@ -520,9 +520,13 @@ class Router:
 
         if stage in ("ba_approval", "pe_approval"):
             doc_label = "BRD" if stage == "ba_approval" else "PRD"
+            # Quality gate detail deliberately left out here -- that's an
+            # internal QA signal for the team, not something the person
+            # driving this pipeline needs to see turn by turn. It's still
+            # fully present in result["quality_gates"] and the RouterResult
+            # data below for anything that actually needs it.
             message = (
                 f"{doc_label} ready -> {result.get('file_path')}\n"
-                f"Quality gates: {result.get('quality_gates')}\n"
                 f"{result.get('message', '')}\n"
                 f"(Say 'export as pdf' anytime if you'd like a copy of this.)"
             )
@@ -548,17 +552,21 @@ class Router:
         return RouterResult(kind="message", message=result.get("message", str(result)), active_project=self.active_project)
 
     def _summarize_rfc_result(self, result: Dict) -> str:
+        # Same reasoning as the BA/PE gate line above: pass/fail counts per
+        # role are an internal QA signal, not something worth surfacing to
+        # whoever is driving the pipeline turn by turn. A role that
+        # genuinely failed to generate is a different, actionable thing --
+        # that still gets shown, since it means something actually broke,
+        # not just that a quality heuristic came back short.
         lines = ["RFCs:"]
         for role in RFC_ROLES:
             gates = result.get("quality_gates_by_role", {}).get(role, {})
-            passed = result.get("quality_gates_passed_by_role", {}).get(role)
             error = result.get("errors", {}).get(role)
             display = ROLE_DISPLAY_NAMES.get(role, role)
             if error:
-                lines.append(f"  [{role}] {display}: FAILED — {error}")
+                lines.append(f"  {display}: failed -- {error}")
             elif gates:
-                overall = "PASS" if passed else "FAIL"
-                lines.append(f"  [{role}] {display}: {overall} ({sum(gates.values())}/{len(gates)})")
+                lines.append(f"  {display}: generated")
         lines.append(result.get("message", ""))
         return "\n".join(lines)
 
