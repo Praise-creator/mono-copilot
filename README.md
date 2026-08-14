@@ -155,19 +155,6 @@ project, or an existing project's name to resume it. Say `export as pdf` at
 any point once a document exists to get a real file under
 `projects/{name}/exports/`.
 
-Keys:
-
-- `Enter` send the message
-- `Ctrl+J` new line without sending
-- `Ctrl+A` select all
-- `/quit` or `/exit` close the app
-- `Ctrl+Q` also closes it
-
-`Shift+Enter` is bound to new line as well, but most terminals send the same
-thing for `Enter` and `Shift+Enter`, so it only works in terminals that
-support the enhanced keyboard protocol (Kitty, WezTerm, Ghostty). `Ctrl+J`
-works everywhere.
-
 To resume a specific project directly without being asked for its name:
 
 ```bash
