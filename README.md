@@ -147,7 +147,7 @@ everything else works, diagrams just show as text in the PDF.
 ## 5. Run The Interactive Terminal UI (the main way to use this)
 
 ```bash
-uv run --package copilot python3 -m copilot.cli chat
+uv run --package copilot mono chat
 ```
 
 Opens a full-screen terminal app: type a business idea to start a new
@@ -158,36 +158,35 @@ any point once a document exists to get a real file under
 To resume a specific project directly without being asked for its name:
 
 ```bash
-uv run --package copilot python3 -m copilot.cli chat --project my-project-name
+uv run --package copilot mono chat --project my-project-name
 ```
 
-There is also a shorter `mono` command that runs the same app:
+**If PDF export fails from `mono chat`, use this instead:**
 
 ```bash
-uv run --package copilot mono chat
+uv run --package copilot python3 -m copilot.cli chat
 ```
 
-**If PDF export fails from `mono chat`, use `python3 -m copilot.cli chat`
-instead.** On some macOS setups, exporting from the `mono` command has failed
-with a "cannot load library" error even after the WeasyPrint setup above,
-while running the module directly worked. It does not happen everywhere and
-we have not pinned down why, so treat this as the workaround if you hit it
-rather than something you need to do up front. Same app either way.
+It runs the same app. On some macOS setups, exporting from the `mono` command
+has failed with a "cannot load library" error even after the WeasyPrint setup
+above, while running the module directly worked. It does not happen
+everywhere and we have not pinned down why, so treat this as the workaround
+if you hit it rather than something to do up front.
 
 Sessions are saved to `projects/{name}/.session.json`, so they survive
 quitting the app or restarting your machine.
 
 ### Other commands
 
-The same CLI has a few non-interactive commands, useful for scripting or for
+`mono` has a few non-interactive commands, useful for scripting or for
 checking state without opening the full app:
 
 ```bash
-uv run --package copilot python3 -m copilot.cli projects
-uv run --package copilot python3 -m copilot.cli show brd --project my-project
-uv run --package copilot python3 -m copilot.cli start --project my-project --problem "..."
-uv run --package copilot python3 -m copilot.cli approve --project my-project --stage ba
-uv run --package copilot python3 -m copilot.cli feedback --project my-project --stage ba
+uv run --package copilot mono projects
+uv run --package copilot mono show brd --project my-project
+uv run --package copilot mono start --project my-project --problem "..."
+uv run --package copilot mono approve --project my-project --stage ba
+uv run --package copilot mono feedback --project my-project --stage ba
 ```
 
 `show` takes `brd`, `prd` or `sources`. `approve` and `feedback` take a
