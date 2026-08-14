@@ -51,6 +51,7 @@ is where that failure can surface, with a clear message rather than a raw
 OSError.
 """
 
+import logging
 import re
 import shutil
 import subprocess
@@ -58,6 +59,8 @@ import tempfile
 from pathlib import Path
 from typing import Optional, List
 from datetime import datetime
+
+logger = logging.getLogger(__name__)
 
 import markdown as markdown_lib
 
@@ -79,6 +82,44 @@ def _find_mmdc_command() -> Optional[List[str]]:
     if shutil.which("bunx"):
         return ["bunx", "@mermaid-js/mermaid-cli"]
     return None
+
+
+def _explain_mmdc_failure(exc: Exception) -> str:
+    """
+    The one useful line out of mmdc's stderr.
+
+    Taking the last line is not good enough. npm prints its own notices after
+    the real error, so the last line is often "npm notice" and says nothing.
+    This looks for the line that actually names the problem first, which is
+    what tells a missing browser apart from a broken npx cache apart from a
+    diagram mmdc could not parse.
+    """
+    detail = getattr(exc, "stderr", None)
+    if isinstance(detail, bytes):
+        detail = detail.decode("utf-8", "replace")
+
+    lines = [line.strip() for line in (detail or "").splitlines() if line.strip()]
+    if not lines:
+        return type(exc).__name__
+
+    # npm's own chatter is never the answer, so it is dropped before looking.
+    def _is_npm_noise(line: str) -> bool:
+        lowered = line.lower()
+        return lowered.startswith("npm notice") or lowered.startswith("npm warn")
+
+    candidates = [line for line in lines if not _is_npm_noise(line)]
+
+    # "error" is matched anywhere in the line rather than as "Error:", because
+    # mermaid reports a bad diagram as "Parse error on line 3:", which has no
+    # colon after the word and would otherwise be missed. That case matters:
+    # a diagram this tool generated being unparseable is a different problem
+    # from a broken toolchain, and the whole point is telling them apart.
+    for pattern in ("error", "cannot find", "could not find", "not found", "err_"):
+        for line in candidates:
+            if pattern in line.lower():
+                return line
+
+    return (candidates or lines)[-1]
 
 
 def render_mermaid_blocks(markdown_text: str, work_dir: Path) -> str:
@@ -104,6 +145,10 @@ def render_mermaid_blocks(markdown_text: str, work_dir: Path) -> str:
     """
     mmdc_cmd = _find_mmdc_command()
     if mmdc_cmd is None:
+        logger.warning(
+            "Mermaid diagrams left as text: no mmdc, npx or bunx found on PATH. "
+            "Install Node, or see the PDF export section of the README."
+        )
         return markdown_text
 
     counter = {"n": 0}
@@ -129,10 +174,25 @@ def render_mermaid_blocks(markdown_text: str, work_dir: Path) -> str:
                 timeout=30,
                 check=True,
             )
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as exc:
+            # Falling back to text is right, but doing it silently is not.
+            # Every cause looks identical in the finished PDF: a missing
+            # browser, a broken npx cache, a diagram mmdc can't parse. Without
+            # this there is nothing to tell them apart, and the README sends
+            # you looking at the toolchain even when the toolchain is fine.
+            # A corrupted ~/.npm/_npx caused exactly that confusion.
+            reason = _explain_mmdc_failure(exc)
+            logger.warning(
+                "Mermaid diagram %d left as text: mmdc failed (%s)",
+                counter["n"], reason[:200],
+            )
             return match.group(0)
 
         if not output_path.exists():
+            logger.warning(
+                "Mermaid diagram %d left as text: mmdc reported success but wrote no image.",
+                counter["n"],
+            )
             return match.group(0)
 
         return f'<img src="file://{output_path.resolve()}" class="mermaid-diagram" alt="diagram" />'

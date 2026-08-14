@@ -65,7 +65,19 @@ class CopilotApp(App):
         if self.router is not None and self._initial_project:
             self._start_router_call(f"/resume {self._initial_project}")
 
+    # Commands the app handles itself, before anything reaches Router.
+    # Router has never known what /quit means, so without this it falls through
+    # to normal input handling: with a project open it is read as review
+    # feedback and regenerates a document, and with no project open it reaches
+    # IntakeAgent, which is a paid API call. The plain CLI has always taken
+    # these, and the README lists /quit, so people reasonably type them here.
+    _EXIT_COMMANDS = ("/quit", "/exit")
+
     def on_user_input_submitted(self, event: UserInputSubmitted):
+        if event.text.strip().lower() in self._EXIT_COMMANDS:
+            self.exit()
+            return
+
         if self._busy:
             return
         self.state_manager.add_message(Message(role="User", content=event.text))
@@ -108,9 +120,22 @@ class CopilotApp(App):
                 Message(role="Assistant", content=f"Something went wrong talking to the backend: {exc}")
             )
         finally:
-            self._set_busy(False)
-            self._refresh_chat_pane()
-            self._sync_workspace_display()
+            # Skipped once the app is shutting down. A generation takes 30 to
+            # 60 seconds, so quitting part way through is easy to do, and by
+            # the time this runs the widgets are gone. Touching them then
+            # raises out of the finally block, which escapes the broad except
+            # above that exists precisely to stop a worker taking the app
+            # down. Seen as "MountError: Can't mount widget(s) before
+            # ChatPane() is mounted" when quitting mid-generation.
+            #
+            # Written as a guard rather than an early return, because
+            # returning from a finally block swallows any in-flight exception
+            # and Python warns about it (SyntaxWarning today, an error in
+            # later versions).
+            if self.is_running:
+                self._set_busy(False)
+                self._refresh_chat_pane()
+                self._sync_workspace_display()
 
     def _set_busy(self, busy: bool) -> None:
         self._busy = busy
