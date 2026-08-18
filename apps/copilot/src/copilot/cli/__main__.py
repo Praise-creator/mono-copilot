@@ -88,6 +88,30 @@ def main():
 
         app.run()
         return
+    
+    if args.cmd is None:
+        app = CopilotApp()
+        
+        project = getattr(args, "project", None)
+        if project:
+            orch = Orchestrator()
+            session = orch.context_manager.get_session(project)
+            app.state_manager.state.active_project = project
+            if session:
+                app.state_manager.state.workflow_stage = session.get("stage")
+                brd = (session.get("ba_output") or {}).get("markdown")
+                prd = (session.get("pe_output") or {}).get("markdown")
+                app.state_manager.state.current_document = brd or prd
+                app.state_manager.add_message(
+                    Message(role="Assistant", content=f"Resumed project '{project}' (stage: {session.get('stage')}).")
+                )
+            else:
+                app.state_manager.add_message(
+                    Message(role="Assistant", content=f"Opened project '{project}' — no persisted session found.")
+                )
+        
+        app.run()
+        return
 
     print("Unknown command")
 
