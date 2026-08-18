@@ -1,0 +1,107 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Validate tag matches package version
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          PKG_VERSION="$(python - <<'PY'
+          import tomllib
+          from pathlib import Path
+          data = tomllib.loads(Path("apps/copilot/pyproject.toml").read_text())
+          print(data["project"]["version"])
+          PY
+          )"
+          if [ "${TAG_VERSION}" != "${PKG_VERSION}" ]; then
+            echo "Tag version and package version do not match."
+            exit 1
+          fi
+
+      - name: Build runtime wheel and sdist
+        working-directory: packages/runtime
+        run: uv build
+
+      - name: Build copilot wheel and sdist
+        working-directory: apps/copilot
+        run: uv build
+
+      - name: Stage release assets
+        run: |
+          mkdir -p release-assets/dist
+          mkdir -p release-assets/installers
+          cp packages/runtime/dist/* release-assets/dist/
+          cp apps/copilot/dist/* release-assets/dist/
+          cp .github/scripts/install.sh release-assets/installers/install.sh
+          cp .github/scripts/install.ps1 release-assets/installers/install.ps1
+
+      - name: Smoke install from staged wheels
+        run: |
+          python -m venv .venv
+          . .venv/bin/activate
+          python -m pip install --upgrade pip
+          python -m pip install release-assets/dist/runtime-*.whl
+          python -m pip install --find-links release-assets/dist release-assets/dist/copilot-*.whl
+          mono --help
+          mono-copilot --help
+
+      - name: Upload dist artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: release-assets/dist/*
+
+      - name: Upload installer artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: installers
+          path: release-assets/installers/*
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download dist artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+
+      - name: Download installer artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: installers
+          path: installers
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist/*
+            installers/install.sh
+            installers/install.ps1

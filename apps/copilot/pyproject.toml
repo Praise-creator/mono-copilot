@@ -1,6 +1,6 @@
 [project]
 name = "copilot"
-version = "0.1.0"
+version = "0.1.0-test1"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
@@ -22,6 +22,8 @@ dependencies = [
 [project.scripts]
 start = "copilot.main:run"
 mono = "copilot.cli.__main__:main"
+
+mono-copilot = "copilot.cli.__main__:main"
 
 [tool.uv.sources]
 runtime = { workspace = true }
